@@ -30,3 +30,4 @@ jobs:
           git add wallpaper.png
           git diff --cached --quiet || git commit -m "Update wallpaper"
           git push
+          
