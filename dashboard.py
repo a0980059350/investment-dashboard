@@ -78,10 +78,10 @@ def main():
     for ax in axes: ax.set_facecolor('white')
     for ax,c in zip(axes[:2],FUNDS):
         try: plot_fund(ax,c['name'],fetch_fund(c['url']))
-        except Exception as e: ax.axis('off'); ax.text(.02,.65,c['name'],fontsize=20,fontweight='bold'); ax.text(.02,.42,f'資料更新失敗\n{type(e).__name__}: {e}',fontsize=14)
+        except Exception as e:print("基金錯誤：", c['name'], repr(e)); ax.axis('off'); ax.text(.02,.65,c['name'],fontsize=20,fontweight='bold'); ax.text(.02,.42,f'資料更新失敗\n{type(e).__name__}: {e}',fontsize=14)
     for ax,c in zip(axes[2:],ETFS):
         try: plot_etf(ax,c['name'],fetch_etf(c['ticker']),c['ema'])
-        except Exception as e: ax.axis('off'); ax.text(.02,.65,c['name'],fontsize=20,fontweight='bold'); ax.text(.02,.42,f'資料更新失敗\n{type(e).__name__}: {e}',fontsize=14)
+        except Exception as e:print("ETF錯誤：", c['name'], repr(e)); ax.axis('off'); ax.text(.02,.65,c['name'],fontsize=20,fontweight='bold'); ax.text(.02,.42,f'資料更新失敗\n{type(e).__name__}: {e}',fontsize=14)
     fig.text(.08,.015,f"更新時間：{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}",fontsize=13,alpha=.75)
     plt.savefig(OUTPUT,dpi=100,facecolor=fig.get_facecolor()); plt.close(fig); print('已產生',OUTPUT)
 if __name__=='__main__': main()
