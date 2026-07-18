@@ -23,6 +23,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install Chinese fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+          fc-cache -fv
+
       - run: pip install -r requirements.txt
 
       - run: python dashboard.py
@@ -40,7 +46,5 @@ jobs:
           fi
 
           git commit -m "Update wallpaper"
-
           git pull --rebase origin main
-
           git push
