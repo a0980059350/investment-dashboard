@@ -3,7 +3,7 @@ name: Update Dashboard
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * *"
+        - cron: '0 12 * * *'
 
 permissions:
   contents: write
@@ -30,4 +30,5 @@ jobs:
           git add wallpaper.png
           git diff --cached --quiet || git commit -m "Update wallpaper"
           git push
+          
           
