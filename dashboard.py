@@ -1,5 +1,6 @@
 import os, re, time
 from datetime import datetime
+from io import StringIO
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -78,22 +79,19 @@ _PANEL_CMAP = LinearSegmentedColormap.from_list(
 
 
 def setup_font():
-
     font_paths = [
         '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-        '/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf'
+        '/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf',
+        '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/truetype/arphic/ukai.ttc',
+        '/usr/share/fonts/truetype/arphic/uming.ttc'
     ]
 
     for path in font_paths:
-
         if os.path.exists(path):
-
-            font_name = font_manager.FontProperties(
-                fname=path
-            ).get_name()
-
+            font_manager.fontManager.addfont(path)
+            font_name = font_manager.FontProperties(fname=path).get_name()
             plt.rcParams['font.family'] = font_name
-
             break
 
     plt.rcParams['axes.unicode_minus'] = False
@@ -104,90 +102,107 @@ def setup_font():
     plt.rcParams['ytick.color'] = TEXT_DIM
 
 
+def flatten_columns(columns):
+    if isinstance(columns, pd.MultiIndex):
+        result = []
+        for column in columns:
+            parts = [
+                str(part).strip()
+                for part in column
+                if str(part).strip() not in ('', 'nan', 'None')
+            ]
+            result.append(' '.join(parts))
+        return result
+
+    return [str(column).strip() for column in columns]
+
+
+def parse_fund_date(value):
+    text = str(value).strip()
+    text = re.sub(r'\s+', '', text)
+    text = text.replace('.', '/').replace('-', '/')
+
+    if not text or text.lower() in ('nan', 'none'):
+        return pd.NaT
+
+    current_year = datetime.now(TZ).year
+
+    # 月/日
+    if re.fullmatch(r'\d{1,2}/\d{1,2}', text):
+        text = f'{current_year}/{text}'
+
+    # 民國年/月/日，例如 113/07/18
+    match = re.fullmatch(r'(\d{2,3})/(\d{1,2})/(\d{1,2})', text)
+    if match:
+        year = int(match.group(1))
+        if year < 1911:
+            text = f'{year + 1911}/{match.group(2)}/{match.group(3)}'
+
+    return pd.to_datetime(text, errors='coerce')
+
+
+def parse_fund_value(value):
+    text = str(value).strip()
+    text = text.replace(',', '')
+    text = re.sub(r'[^\d.\-]', '', text)
+    return pd.to_numeric(text, errors='coerce')
+
+
 def clean_table(table):
-
     table = table.copy()
-
-    table.columns = [
-        str(column).strip()
-        for column in table.columns
-    ]
+    table.columns = flatten_columns(table.columns)
 
     date_column = next(
-        (
-            column
-            for column in table.columns
-            if '日期' in column
-        ),
+        (column for column in table.columns if '日期' in column),
         None
     )
 
     value_column = next(
-        (
-            column
-            for column in table.columns
-            if '淨值' in column
-        ),
+        (column for column in table.columns if '淨值' in column),
         None
     )
 
-    if not date_column or not value_column:
-        raise ValueError('找不到日期/淨值欄位')
+    # 有些網頁把標題放在資料列，不在欄名
+    if date_column is None or value_column is None:
+        for row_index in range(min(8, len(table))):
+            row_text = [str(value).strip() for value in table.iloc[row_index].tolist()]
 
-    output = table[
-        [date_column, value_column]
-    ].copy()
+            date_pos = next(
+                (index for index, value in enumerate(row_text) if '日期' in value),
+                None
+            )
+            value_pos = next(
+                (index for index, value in enumerate(row_text) if '淨值' in value),
+                None
+            )
 
-    output.columns = [
-        'Date',
-        'Value'
-    ]
+            if date_pos is not None and value_pos is not None:
+                table = table.iloc[row_index + 1:, [date_pos, value_pos]].copy()
+                table.columns = ['Date', 'Value']
+                break
+        else:
+            raise ValueError('找不到日期/淨值欄位')
+    else:
+        table = table[[date_column, value_column]].copy()
+        table.columns = ['Date', 'Value']
 
-    current_year = datetime.now(TZ).year
-
-    def parse_date(value):
-
-        text = str(value).strip()
-
-        if re.fullmatch(
-            r'\d{1,2}/\d{1,2}',
-            text
-        ):
-            text = f'{current_year}/{text}'
-
-        return pd.to_datetime(
-            text,
-            errors='coerce'
-        )
-
-    output['Date'] = output[
-        'Date'
-    ].map(parse_date)
-
-    output['Value'] = pd.to_numeric(
-        output['Value']
-        .astype(str)
-        .str.replace(',', '', regex=False),
-        errors='coerce'
-    )
+    table['Date'] = table['Date'].map(parse_fund_date)
+    table['Value'] = table['Value'].map(parse_fund_value)
 
     return (
-        output
-        .dropna()
+        table
+        .dropna(subset=['Date', 'Value'])
         .drop_duplicates('Date')
         .sort_values('Date')
     )
 
 
 def fetch_fund(url):
-
     last_error = None
     response = None
 
     for attempt in range(3):
-
         try:
-
             response = requests.get(
                 url,
                 headers={
@@ -203,94 +218,75 @@ def fetch_fund(url):
                 },
                 timeout=60
             )
-
             response.raise_for_status()
+
+            if not response.encoding or response.encoding.lower() == 'iso-8859-1':
+                response.encoding = response.apparent_encoding
 
             break
 
         except Exception as error:
-
             last_error = error
-
             print(
                 f'基金抓取失敗，第 {attempt + 1} 次：',
                 repr(error)
             )
-
             time.sleep(3)
-
     else:
-
         raise RuntimeError(
             f'基金網站連線失敗：{last_error}'
         )
 
-    candidates = []
-
     try:
-
-        tables = pd.read_html(
-            response.text
-        )
-
+        tables = pd.read_html(StringIO(response.text))
     except Exception as error:
-
         raise RuntimeError(
             f'基金網頁表格解析失敗：{error}'
         )
 
+    candidates = []
+
     for table in tables:
-
-        columns_text = ' '.join(
-            map(str, table.columns)
-        )
-
-        if (
-            '日期' in columns_text
-            and '淨值' in columns_text
-        ):
-
-            try:
-
-                candidates.append(
-                    clean_table(table)
-                )
-
-            except Exception:
-
-                pass
+        try:
+            cleaned = clean_table(table)
+            if len(cleaned) >= 2:
+                candidates.append(cleaned)
+        except Exception:
+            continue
 
     if not candidates:
-        raise RuntimeError('基金資料抓取失敗')
+        raise RuntimeError(
+            f'基金資料抓取失敗：共找到 {len(tables)} 個表格，但無法辨識日期與淨值'
+        )
 
     data = (
-        pd.concat(candidates)
+        pd.concat(candidates, ignore_index=True)
         .drop_duplicates('Date')
         .sort_values('Date')
     )
 
     start_date = (
-        pd.Timestamp.now()
+        pd.Timestamp.now(tz=TZ).tz_localize(None)
         - pd.Timedelta(days=380)
     )
 
-    return (
-        data[
-            data['Date'] >= start_date
-        ]
+    data = (
+        data[data['Date'] >= start_date]
         .tail(270)
     )
 
+    if len(data) < 2:
+        raise RuntimeError('基金資料筆數不足')
+
+    return data
+
 
 def fetch_etf(ticker):
-
     data = pd.DataFrame()
     last_error = None
 
     for attempt in range(3):
-
         try:
-
             data = yf.download(
                 ticker,
                 period='18mo',
@@ -305,9 +301,7 @@ def fetch_etf(ticker):
                 break
 
         except Exception as error:
-
             last_error = error
-
             print(
                 f'ETF抓取失敗 {ticker}，'
                 f'第 {attempt + 1} 次：',
@@ -317,9 +311,7 @@ def fetch_etf(ticker):
         time.sleep(3)
 
     if data.empty:
-
         if last_error is not None:
-
             raise RuntimeError(
                 f'{ticker} 無資料：{last_error}'
             )
@@ -328,22 +320,10 @@ def fetch_etf(ticker):
             f'{ticker} 無資料'
         )
 
-    if isinstance(
-        data.columns,
-        pd.MultiIndex
-    ):
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
 
-        data.columns = (
-            data.columns
-            .get_level_values(0)
-        )
-
-    required_columns = [
-        'Open',
-        'High',
-        'Low',
-        'Close'
-    ]
+    required_columns = ['Open', 'High', 'Low', 'Close']
 
     missing_columns = [
         column
@@ -352,83 +332,36 @@ def fetch_etf(ticker):
     ]
 
     if missing_columns:
-
         raise RuntimeError(
-            f'{ticker} 缺少欄位：'
-            f'{missing_columns}'
+            f'{ticker} 缺少欄位：{missing_columns}'
         )
 
-    data = (
-        data[
-            required_columns
-        ]
-        .dropna()
-    )
+    data = data[required_columns].dropna()
 
     weekly_data = pd.DataFrame({
-        'Open': data['Open']
-        .resample('W-FRI')
-        .first(),
-
-        'High': data['High']
-        .resample('W-FRI')
-        .max(),
-
-        'Low': data['Low']
-        .resample('W-FRI')
-        .min(),
-
-        'Close': data['Close']
-        .resample('W-FRI')
-        .last()
+        'Open': data['Open'].resample('W-FRI').first(),
+        'High': data['High'].resample('W-FRI').max(),
+        'Low': data['Low'].resample('W-FRI').min(),
+        'Close': data['Close'].resample('W-FRI').last()
     })
 
-    return (
-        weekly_data
-        .dropna()
-        .tail(53)
-    )
+    return weekly_data.dropna().tail(53)
 
 
 def stats(series):
-
     series = series.dropna()
 
-    latest = float(
-        series.iloc[-1]
-    )
+    latest = float(series.iloc[-1])
+    high = float(series.max())
+    drawdown = latest / high - 1
+    return_rate = latest / float(series.iloc[0]) - 1
 
-    high = float(
-        series.max()
-    )
-
-    drawdown = (
-        latest / high
-        - 1
-    )
-
-    return_rate = (
-        latest
-        / float(series.iloc[0])
-        - 1
-    )
-
-    return (
-        latest,
-        high,
-        drawdown,
-        return_rate
-    )
+    return latest, high, drawdown, return_rate
 
 
 def card_backdrop(ax):
-
     ax.imshow(
-        np.linspace(
-            0,
-            1,
-            256
-        ).reshape(-1, 1),
+        np.linspace(0, 1, 256).reshape(-1, 1),
         cmap=_PANEL_CMAP,
         extent=(0, 1, 0, 1),
         transform=ax.transAxes,
@@ -438,13 +371,7 @@ def card_backdrop(ax):
     )
 
 
-def corner_brackets(
-    ax,
-    frac=0.045,
-    lw=2.6,
-    color=GOLD_BRIGHT
-):
-
+def corner_brackets(ax, frac=0.045, lw=2.6, color=GOLD_BRIGHT):
     corners = [
         (0, 0, 1, 1),
         (1, 0, -1, 1),
@@ -453,7 +380,6 @@ def corner_brackets(
     ]
 
     for x, y, dx, dy in corners:
-
         ax.plot(
             [x, x + dx * frac],
             [y, y],
@@ -477,39 +403,15 @@ def corner_brackets(
         )
 
 
-def draw_signal_light(
-    fig,
-    ax,
-    up,
-    x=0.92,
-    y=0.965,
-    r_px=10
-):
+def draw_signal_light(fig, ax, up, x=0.92, y=0.965, r_px=10):
+    fill = LIGHT_GREEN if up else LIGHT_RED
+    edge = LIGHT_GREEN_EDGE if up else LIGHT_RED_EDGE
 
-    fill = (
-        LIGHT_GREEN
-        if up
-        else LIGHT_RED
-    )
-
-    edge = (
-        LIGHT_GREEN_EDGE
-        if up
-        else LIGHT_RED_EDGE
-    )
-
-    x_display, y_display = (
-        ax.transAxes.transform(
-            (x, y)
-        )
-    )
+    x_display, y_display = ax.transAxes.transform((x, y))
 
     fig.add_artist(
         Circle(
-            (
-                x_display,
-                y_display
-            ),
+            (x_display, y_display),
             r_px,
             transform=IdentityTransform(),
             facecolor=fill,
@@ -522,47 +424,20 @@ def draw_signal_light(
 
 
 def style_card(ax):
-
     ax.set_facecolor('none')
-
     card_backdrop(ax)
 
-    for side in [
-        'top',
-        'right',
-        'left',
-        'bottom'
-    ]:
-
-        ax.spines[
-            side
-        ].set_visible(True)
-
-        ax.spines[
-            side
-        ].set_color(GOLD_DIM)
-
-        ax.spines[
-            side
-        ].set_linewidth(1.3)
+    for side in ['top', 'right', 'left', 'bottom']:
+        ax.spines[side].set_visible(True)
+        ax.spines[side].set_color(GOLD_DIM)
+        ax.spines[side].set_linewidth(1.3)
 
     corner_brackets(ax)
 
 
-def plot_fund(
-    ax,
-    name,
-    data,
-    fig
-):
-
-    x = np.arange(
-        len(data)
-    )
-
-    latest, high, drawdown, return_rate = stats(
-        data['Value']
-    )
+def plot_fund(ax, name, data, fig):
+    x = np.arange(len(data))
+    latest, high, drawdown, return_rate = stats(data['Value'])
 
     style_card(ax)
 
@@ -593,15 +468,8 @@ def plot_fund(
         color=TEXT_DIM
     )
 
-    is_up = (
-        abs(drawdown) > 0.20
-    )
-
-    fund_status = (
-        '可以加碼'
-        if is_up
-        else '暫不加碼'
-    )
+    is_up = abs(drawdown) > 0.20
+    fund_status = '可以加碼' if is_up else '暫不加碼'
 
     ax.set_title(
         name,
@@ -636,89 +504,35 @@ def plot_fund(
         )
     )
 
-    draw_signal_light(
-        fig,
-        ax,
-        is_up
-    )
+    draw_signal_light(fig, ax, is_up)
 
-    ax.grid(
-        alpha=0.08,
-        color=GOLD_DIM,
-        lw=0.6
-    )
-
-    ax.set_xlim(
-        0,
-        max(
-            1,
-            len(x) - 1
-        )
-    )
-
-    ax.tick_params(
-        labelbottom=False
-    )
+    ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
+    ax.set_xlim(0, max(1, len(x) - 1))
+    ax.tick_params(labelbottom=False)
 
 
-def plot_etf(
-    ax,
-    name,
-    data,
-    ema_period,
-    fig
-):
-
-    x = np.arange(
-        len(data)
-    )
+def plot_etf(ax, name, data, ema_period, fig):
+    x = np.arange(len(data))
 
     ema = (
         data['Close']
-        .ewm(
-            span=ema_period,
-            adjust=False
-        )
+        .ewm(span=ema_period, adjust=False)
         .mean()
     )
 
-    latest, high, drawdown, return_rate = stats(
-        data['Close']
-    )
-
+    latest, high, drawdown, return_rate = stats(data['Close'])
     stop = high * 0.8
 
     style_card(ax)
 
-    for i, (_, row) in enumerate(
-        data.iterrows()
-    ):
+    for i, (_, row) in enumerate(data.iterrows()):
+        open_price = float(row['Open'])
+        high_price = float(row['High'])
+        low_price = float(row['Low'])
+        close_price = float(row['Close'])
 
-        open_price = float(
-            row['Open']
-        )
-
-        high_price = float(
-            row['High']
-        )
-
-        low_price = float(
-            row['Low']
-        )
-
-        close_price = float(
-            row['Close']
-        )
-
-        candle_up = (
-            close_price >= open_price
-        )
-
-        candle_color = (
-            UP
-            if candle_up
-            else DOWN
-        )
+        candle_up = close_price >= open_price
+        candle_color = UP if candle_up else DOWN
 
         ax.vlines(
             i,
@@ -729,28 +543,15 @@ def plot_etf(
             zorder=4
         )
 
-        body_bottom = min(
-            open_price,
-            close_price
-        )
-
+        body_bottom = min(open_price, close_price)
         body_height = max(
-            abs(
-                close_price
-                - open_price
-            ),
-            max(
-                close_price,
-                open_price
-            ) * 0.001
+            abs(close_price - open_price),
+            max(close_price, open_price) * 0.001
         )
 
         ax.add_patch(
             Rectangle(
-                (
-                    i - 0.21,
-                    body_bottom
-                ),
+                (i - 0.21, body_bottom),
                 0.42,
                 body_height,
                 facecolor=candle_color,
@@ -771,21 +572,8 @@ def plot_etf(
         zorder=6
     )
 
-    ax.axhline(
-        high,
-        lw=1.1,
-        ls='--',
-        color=GOLD_DIM,
-        zorder=3
-    )
-
-    ax.axhline(
-        stop,
-        lw=1.3,
-        ls=':',
-        color=TEXT_DIM,
-        zorder=3
-    )
+    ax.axhline(high, lw=1.1, ls='--', color=GOLD_DIM, zorder=3)
+    ax.axhline(stop, lw=1.3, ls=':', color=TEXT_DIM, zorder=3)
 
     ax.text(
         len(x) - 1,
@@ -807,13 +595,7 @@ def plot_etf(
         color=TEXT_DIM
     )
 
-    is_up = (
-        latest
-        > float(
-            ema.iloc[-1]
-        )
-    )
-
+    is_up = latest > float(ema.iloc[-1])
     status = (
         f'站上週EMA{ema_period}'
         if is_up
@@ -853,91 +635,36 @@ def plot_etf(
         )
     )
 
-    draw_signal_light(
-        fig,
-        ax,
-        is_up
-    )
+    draw_signal_light(fig, ax, is_up)
 
-    ax.grid(
-        alpha=0.08,
-        color=GOLD_DIM,
-        lw=0.6
-    )
-
-    ax.set_xlim(
-        -1,
-        len(x)
-    )
-
-    ax.tick_params(
-        labelbottom=False
-    )
+    ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
+    ax.set_xlim(-1, len(x))
+    ax.tick_params(labelbottom=False)
 
 
 def add_vignette(fig):
-
-    ax = fig.add_axes(
-        [0, 0, 1, 1],
-        zorder=-20
-    )
-
+    ax = fig.add_axes([0, 0, 1, 1], zorder=-20)
     ax.axis('off')
-
-    ax.set_xlim(
-        0,
-        1
-    )
-
-    ax.set_ylim(
-        0,
-        1
-    )
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
 
     ny = 300
     nx = 140
 
-    yy, xx = np.mgrid[
-        0:ny,
-        0:nx
-    ]
+    yy, xx = np.mgrid[0:ny, 0:nx]
 
-    cx = (
-        nx - 1
-    ) / 2
-
-    cy = (
-        ny - 1
-    ) / 2
+    cx = (nx - 1) / 2
+    cy = (ny - 1) / 2
 
     distance = np.sqrt(
-        (
-            (xx - cx) / cx
-        ) ** 2
-        +
-        (
-            (yy - cy) / cy
-        ) ** 2
+        ((xx - cx) / cx) ** 2
+        + ((yy - cy) / cy) ** 2
     )
 
-    distance = np.clip(
-        distance,
-        0,
-        1
-    )
+    distance = np.clip(distance, 0, 1)
+    alpha = (distance ** 2.2) * 0.5
 
-    alpha = (
-        distance ** 2.2
-    ) * 0.5
-
-    rgba = np.zeros(
-        (
-            ny,
-            nx,
-            4
-        )
-    )
-
+    rgba = np.zeros((ny, nx, 4))
     rgba[..., 3] = alpha
 
     ax.imshow(
@@ -949,28 +676,17 @@ def add_vignette(fig):
 
 
 def main():
-
     setup_font()
 
-    fig = plt.figure(
-        figsize=(10.8, 24),
-        dpi=100
-    )
-
-    fig.patch.set_facecolor(
-        BG
-    )
+    fig = plt.figure(figsize=(10.8, 24), dpi=100)
+    fig.patch.set_facecolor(BG)
 
     add_vignette(fig)
 
     grid = fig.add_gridspec(
         3,
         2,
-        height_ratios=[
-            0.5,
-            4.75,
-            4.75
-        ],
+        height_ratios=[0.5, 4.75, 4.75],
         hspace=0.34,
         wspace=0.30,
         left=0.075,
@@ -979,21 +695,10 @@ def main():
         bottom=0.028
     )
 
-    title_ax = fig.add_subplot(
-        grid[0, :]
-    )
-
+    title_ax = fig.add_subplot(grid[0, :])
     title_ax.axis('off')
-
-    title_ax.set_xlim(
-        0,
-        1
-    )
-
-    title_ax.set_ylim(
-        0,
-        1
-    )
+    title_ax.set_xlim(0, 1)
+    title_ax.set_ylim(0, 1)
 
     title_ax.text(
         0,
@@ -1036,34 +741,18 @@ def main():
     )
 
     fund_axes = [
-        fig.add_subplot(
-            grid[1, 0]
-        ),
-        fig.add_subplot(
-            grid[1, 1]
-        )
+        fig.add_subplot(grid[1, 0]),
+        fig.add_subplot(grid[1, 1])
     ]
 
     etf_axes = [
-        fig.add_subplot(
-            grid[2, 0]
-        ),
-        fig.add_subplot(
-            grid[2, 1]
-        )
+        fig.add_subplot(grid[2, 0]),
+        fig.add_subplot(grid[2, 1])
     ]
 
-    for ax, fund in zip(
-        fund_axes,
-        FUNDS
-    ):
-
+    for ax, fund in zip(fund_axes, FUNDS):
         try:
-
-            fund_data = fetch_fund(
-                fund['url']
-            )
-
+            fund_data = fetch_fund(fund['url'])
             plot_fund(
                 ax,
                 fund['name'],
@@ -1072,7 +761,6 @@ def main():
             )
 
         except Exception as error:
-
             print(
                 '基金錯誤:',
                 fund['name'],
@@ -1080,7 +768,6 @@ def main():
             )
 
             style_card(ax)
-
             ax.set_xticks([])
             ax.set_yticks([])
 
@@ -1106,17 +793,9 @@ def main():
                 transform=ax.transAxes
             )
 
-    for ax, etf in zip(
-        etf_axes,
-        ETFS
-    ):
-
+    for ax, etf in zip(etf_axes, ETFS):
         try:
-
-            etf_data = fetch_etf(
-                etf['ticker']
-            )
-
+            etf_data = fetch_etf(etf['ticker'])
             plot_etf(
                 ax,
                 etf['name'],
@@ -1126,7 +805,6 @@ def main():
             )
 
         except Exception as error:
-
             print(
                 'ETF錯誤:',
                 etf['name'],
@@ -1134,7 +812,6 @@ def main():
             )
 
             style_card(ax)
-
             ax.set_xticks([])
             ax.set_yticks([])
 
@@ -1181,11 +858,9 @@ def main():
 
     plt.close(fig)
 
-    print(
-        '已產生',
-        OUTPUT
-    )
+    print('已產生', OUTPUT)
 
 
 if __name__ == '__main__':
     main()
+
