@@ -44,7 +44,9 @@ jobs:
             echo "No changes"
             exit 0
           fi
+          git commit -m "更新桌布" || echo "Nothing to commit"
 
-          git commit -m "Update wallpaper"
           git pull --rebase origin main
-          git push
+
+          git push origin HEAD:main
+  
