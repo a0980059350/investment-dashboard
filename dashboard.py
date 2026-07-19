@@ -24,11 +24,11 @@ OUTPUT = 'wallpaper.png'
 
 FUNDS = [
     {
-        'name': '安聯台灣科技基金',
+        'name': '安聯科技',
         'url': 'https://fund.hncb.com.tw/w/wr/wr02_ACDD04-005003.djhtm'
     },
     {
-        'name': '統一全球新科技基金',
+        'name': '統一科技',
         'url': 'https://fund.hncb.com.tw/w/wr/wr02_ACPS38-009022.djhtm'
     }
 ]
@@ -126,10 +126,13 @@ def parse_fund_date(value):
         return pd.NaT
 
     current_year = datetime.now(TZ).year
+    current_month = datetime.now(TZ).month
 
     # 月/日
     if re.fullmatch(r'\d{1,2}/\d{1,2}', text):
-        text = f'{current_year}/{text}'
+        month = int(text.split('/')[0])
+        year = current_year - 1 if month > current_month else current_year
+        text = f'{year}/{text}'
 
     # 民國年/月/日，例如 113/07/18
     match = re.fullmatch(r'(\d{2,3})/(\d{1,2})/(\d{1,2})', text)
@@ -348,6 +351,16 @@ def fetch_etf(ticker):
     return weekly_data.dropna().tail(53)
 
 
+def is_week_complete(period_end):
+    if getattr(period_end, 'tzinfo', None) is not None:
+        period_end_date = period_end.tz_convert(TZ).date()
+    else:
+        period_end_date = period_end.date()
+
+    today = datetime.now(TZ).date()
+    return period_end_date <= today
+
+
 def stats(series):
     series = series.dropna()
 
@@ -403,9 +416,24 @@ def corner_brackets(ax, frac=0.045, lw=2.6, color=GOLD_BRIGHT):
         )
 
 
-def draw_signal_light(fig, ax, up, x=0.92, y=0.965, r_px=10):
+def draw_signal_light(fig, ax, up, label=None, x=0.92, y=0.965, r_px=10):
     fill = LIGHT_GREEN if up else LIGHT_RED
     edge = LIGHT_GREEN_EDGE if up else LIGHT_RED_EDGE
+
+    if label:
+        ax.text(
+            x - 0.035,
+            y,
+            label,
+            transform=ax.transAxes,
+            ha='right',
+            va='center',
+            fontsize=12,
+            fontweight='bold',
+            color=fill,
+            zorder=31,
+            clip_on=False
+        )
 
     x_display, y_display = ax.transAxes.transform((x, y))
 
@@ -469,7 +497,7 @@ def plot_fund(ax, name, data, fig):
     )
 
     is_up = abs(drawdown) > 0.20
-    fund_status = '可以加碼' if is_up else '暫不加碼'
+    fund_status = '可以加碼' if is_up else '暫停加碼'
 
     ax.set_title(
         name,
@@ -484,7 +512,6 @@ def plot_fund(ax, name, data, fig):
         0.97,
         0.93,
         (
-            f'{fund_status}\n'
             f'最新淨值 {latest:.2f}\n'
             f'近一年報酬 {return_rate:+.1%}\n'
             f'回撤 {drawdown:.1%}'
@@ -504,7 +531,7 @@ def plot_fund(ax, name, data, fig):
         )
     )
 
-    draw_signal_light(fig, ax, is_up)
+    draw_signal_light(fig, ax, is_up, label=fund_status)
 
     ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
     ax.set_xlim(0, max(1, len(x) - 1))
@@ -595,11 +622,17 @@ def plot_etf(ax, name, data, ema_period, fig):
         color=TEXT_DIM
     )
 
-    is_up = latest > float(ema.iloc[-1])
+    week_complete = is_week_complete(data.index[-1])
+    signal_index = -1 if week_complete else -2
+
+    signal_close = float(data['Close'].iloc[signal_index])
+    signal_ema = float(ema.iloc[signal_index])
+
+    is_up = signal_close > signal_ema
     status = (
-        f'站上週EMA{ema_period}'
+        f'站上{ema_period}週線'
         if is_up
-        else f'跌破週EMA{ema_period}'
+        else f'跌破{ema_period}週線'
     )
 
     ax.set_title(
@@ -617,8 +650,7 @@ def plot_etf(ax, name, data, ema_period, fig):
         (
             f'最新價 {latest:.2f}\n'
             f'近一年報酬 {return_rate:+.1%}\n'
-            f'回撤 {drawdown:.1%}\n'
-            f'{status}'
+            f'回撤 {drawdown:.1%}'
         ),
         transform=ax.transAxes,
         ha='right',
@@ -635,7 +667,7 @@ def plot_etf(ax, name, data, ema_period, fig):
         )
     )
 
-    draw_signal_light(fig, ax, is_up)
+    draw_signal_light(fig, ax, is_up, label=status)
 
     ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
     ax.set_xlim(-1, len(x))
@@ -703,7 +735,7 @@ def main():
     title_ax.text(
         0,
         0.78,
-        '科技四核心投資儀表板',
+        '投資儀表板',
         fontsize=36,
         fontweight='bold',
         ha='left',
@@ -712,14 +744,17 @@ def main():
     )
 
     title_ax.text(
-        0,
-        0.32,
-        '基金 × ETF｜近一年',
-        fontsize=13,
-        ha='left',
+        1,
+        0.78,
+        (
+            '更新時間：'
+            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
+        ),
+        fontsize=10,
+        ha='right',
         va='center',
-        color=GOLD_LIGHT,
-        alpha=0.9
+        color=TEXT_DIM,
+        alpha=0.85
     )
 
     title_ax.plot(
@@ -837,19 +872,6 @@ def main():
                 transform=ax.transAxes
             )
 
-    fig.text(
-        0.955,
-        0.014,
-        (
-            '更新時間：'
-            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
-        ),
-        fontsize=10,
-        ha='right',
-        color=TEXT_DIM,
-        alpha=0.85
-    )
-
     plt.savefig(
         OUTPUT,
         dpi=100,
@@ -863,4 +885,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
