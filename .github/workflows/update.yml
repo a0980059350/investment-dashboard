@@ -49,6 +49,6 @@ jobs:
 
           git commit -m "更新桌布"
 
-          git pull --rebase -X theirs origin main
+          git pull --rebase -X ours origin main
 
           git push origin HEAD:main
