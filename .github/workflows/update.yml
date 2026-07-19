@@ -29,9 +29,11 @@ jobs:
           sudo apt-get install -y fonts-noto-cjk
           fc-cache -fv
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - run: python dashboard.py
+      - name: Generate wallpaper
+        run: python dashboard.py
 
       - name: Commit wallpaper
         run: |
@@ -44,9 +46,9 @@ jobs:
             echo "No changes"
             exit 0
           fi
-          git commit -m "更新桌布" || echo "Nothing to commit"
 
-          git pull --rebase origin main
+          git commit -m "更新桌布"
+
+          git pull --rebase -X theirs origin main
 
           git push origin HEAD:main
-  
