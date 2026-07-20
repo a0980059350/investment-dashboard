@@ -40,19 +40,20 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          cp wallpaper.png /tmp/wallpaper.png
-
           git fetch origin main
-          git reset --hard origin/main
 
-          cp /tmp/wallpaper.png wallpaper.png
+          NEW_BLOB=$(git hash-object wallpaper.png)
+          OLD_BLOB=$(git rev-parse origin/main:wallpaper.png 2>/dev/null || echo "")
 
-          git add wallpaper.png
-
-          if git diff --cached --quiet; then
+          if [ "$NEW_BLOB" = "$OLD_BLOB" ]; then
             echo "No changes"
             exit 0
           fi
 
-          git commit -m "更新桌布"
-          git push origin HEAD:main
+          git read-tree origin/main
+          git update-index --add --cacheinfo 100644,$(git hash-object -w wallpaper.png),wallpaper.png
+
+          TREE=$(git write-tree)
+          COMMIT=$(git commit-tree "$TREE" -p origin/main -m "更新桌布")
+
+          git push origin "$COMMIT":main
