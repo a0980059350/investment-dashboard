@@ -286,7 +286,6 @@ def fetch_fund(url):
 
 def fetch_etf(ticker):
     data = pd.DataFrame()
-    raw_data = pd.DataFrame()
     last_error = None
 
     for attempt in range(3):
@@ -301,17 +300,7 @@ def fetch_etf(ticker):
                 timeout=30
             )
 
-            raw_data = yf.download(
-                ticker,
-                period='18mo',
-                interval='1d',
-                auto_adjust=False,
-                progress=False,
-                threads=False,
-                timeout=30
-            )
-
-            if not data.empty and not raw_data.empty:
+            if not data.empty:
                 break
 
         except Exception as error:
@@ -324,7 +313,7 @@ def fetch_etf(ticker):
 
         time.sleep(3)
 
-    if data.empty or raw_data.empty:
+    if data.empty:
         if last_error is not None:
             raise RuntimeError(
                 f'{ticker} 無資料：{last_error}'
@@ -336,9 +325,6 @@ def fetch_etf(ticker):
 
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
-
-    if isinstance(raw_data.columns, pd.MultiIndex):
-        raw_data.columns = raw_data.columns.get_level_values(0)
 
     required_columns = ['Open', 'High', 'Low', 'Close']
 
@@ -354,7 +340,6 @@ def fetch_etf(ticker):
         )
 
     data = data[required_columns].dropna()
-    daily_raw_close = raw_data['Close'].dropna()
 
     weekly_data = pd.DataFrame({
         'Open': data['Open'].resample('W-FRI').first(),
@@ -363,11 +348,7 @@ def fetch_etf(ticker):
         'Close': data['Close'].resample('W-FRI').last()
     })
 
-    return {
-        'weekly': weekly_data.dropna().tail(53),
-        'daily_adj': data['Close'],
-        'daily_raw': daily_raw_close
-    }
+    return weekly_data.dropna().tail(53)
 
 
 def is_week_complete(period_end):
@@ -389,58 +370,6 @@ def stats(series):
     return_rate = latest / float(series.iloc[0]) - 1
 
     return latest, high, drawdown, return_rate
-
-
-def date_based_stats(dates, values):
-    """
-    以「去年今天」到「今天」為基準計算報酬率與回撤。
-    若去年今天當天不是交易日，自動改用前一個交易日的資料。
-    """
-    series = (
-        pd.Series(list(values), index=pd.DatetimeIndex(dates))
-        .sort_index()
-    )
-    series = series[~series.index.duplicated(keep='last')].dropna()
-
-    latest_date = series.index[-1]
-    latest = float(series.iloc[-1])
-
-    one_year_ago = latest_date - pd.DateOffset(years=1)
-
-    base_slice = series[series.index <= one_year_ago]
-
-    if not base_slice.empty:
-        base_value = float(base_slice.iloc[-1])
-        window_start = base_slice.index[-1]
-    else:
-        base_value = float(series.iloc[0])
-        window_start = series.index[0]
-
-    window = series[series.index >= window_start]
-    high = float(window.max())
-
-    return_rate = latest / base_value - 1
-    drawdown = latest / high - 1
-
-    return latest, high, drawdown, return_rate
-
-
-def latest_and_high(dates, values):
-    """近一年（今天往前一年）的最新值與最高值，用於顯示一般（未還原）價格。"""
-    series = (
-        pd.Series(list(values), index=pd.DatetimeIndex(dates))
-        .sort_index()
-    )
-    series = series[~series.index.duplicated(keep='last')].dropna()
-
-    latest_date = series.index[-1]
-    latest = float(series.iloc[-1])
-
-    window_start = latest_date - pd.DateOffset(years=1)
-    window = series[series.index >= window_start]
-    high = float(window.max())
-
-    return latest, high
 
 
 def card_backdrop(ax):
@@ -536,10 +465,7 @@ def style_card(ax):
 
 def plot_fund(ax, name, data, fig):
     x = np.arange(len(data))
-    latest, high, drawdown, return_rate = date_based_stats(
-        data['Date'],
-        data['Value']
-    )
+    latest, high, drawdown, return_rate = stats(data['Value'])
 
     style_card(ax)
 
@@ -550,13 +476,6 @@ def plot_fund(ax, name, data, fig):
         color=GOLD_BRIGHT,
         solid_capstyle='round',
         zorder=5
-    )
-
-    y_min, y_max = ax.get_ylim()
-    data_range = high - y_min
-    ax.set_ylim(
-        y_min - data_range * 0.12,
-        high + data_range * 0.14
     )
 
     ax.axhline(
@@ -591,7 +510,7 @@ def plot_fund(ax, name, data, fig):
 
     ax.text(
         0.97,
-        0.06,
+        0.93,
         (
             f'最新淨值 {latest:.2f}\n'
             f'近一年報酬 {return_rate:+.1%}\n'
@@ -599,7 +518,7 @@ def plot_fund(ax, name, data, fig):
         ),
         transform=ax.transAxes,
         ha='right',
-        va='bottom',
+        va='top',
         fontsize=12,
         color=TEXT,
         linespacing=1.7,
@@ -619,8 +538,7 @@ def plot_fund(ax, name, data, fig):
     ax.tick_params(labelbottom=False)
 
 
-def plot_etf(ax, name, etf_bundle, ema_period, fig):
-    data = etf_bundle['weekly']
+def plot_etf(ax, name, data, ema_period, fig):
     x = np.arange(len(data))
 
     ema = (
@@ -629,15 +547,8 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         .mean()
     )
 
-    latest, high = latest_and_high(
-        etf_bundle['daily_raw'].index,
-        etf_bundle['daily_raw'].values
-    )
-
-    _, _, drawdown, return_rate = date_based_stats(
-        etf_bundle['daily_adj'].index,
-        etf_bundle['daily_adj'].values
-    )
+    latest, high, drawdown, return_rate = stats(data['Close'])
+    stop = high * 0.8
 
     style_card(ax)
 
@@ -688,19 +599,23 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         zorder=6
     )
 
-    y_min, y_max = ax.get_ylim()
-    data_range = high - y_min
-    ax.set_ylim(
-        y_min - data_range * 0.12,
-        high + data_range * 0.14
-    )
-
     ax.axhline(high, lw=1.1, ls='--', color=GOLD_DIM, zorder=3)
+    ax.axhline(stop, lw=1.3, ls=':', color=TEXT_DIM, zorder=3)
 
     ax.text(
         len(x) - 1,
         high,
         f' 最高 {high:.2f}',
+        va='bottom',
+        ha='right',
+        fontsize=11,
+        color=TEXT_DIM
+    )
+
+    ax.text(
+        len(x) - 1,
+        stop,
+        f' 停損價 {stop:.2f}',
         va='bottom',
         ha='right',
         fontsize=11,
@@ -731,7 +646,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
 
     ax.text(
         0.97,
-        0.06,
+        0.94,
         (
             f'最新價 {latest:.2f}\n'
             f'近一年報酬 {return_rate:+.1%}\n'
@@ -739,7 +654,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         ),
         transform=ax.transAxes,
         ha='right',
-        va='bottom',
+        va='top',
         fontsize=12,
         color=TEXT,
         linespacing=1.65,
@@ -795,7 +710,7 @@ def add_vignette(fig):
 def main():
     setup_font()
 
-    fig = plt.figure(figsize=(10.8, 23.4), dpi=100)
+    fig = plt.figure(figsize=(10.8, 24), dpi=100)
     fig.patch.set_facecolor(BG)
 
     add_vignette(fig)
@@ -803,13 +718,13 @@ def main():
     grid = fig.add_gridspec(
         3,
         2,
-        height_ratios=[0.42, 4.79, 4.79],
-        hspace=0.10,
-        wspace=0.06,
-        left=0.03,
-        right=0.97,
-        top=0.985,
-        bottom=0.010
+        height_ratios=[0.5, 4.75, 4.75],
+        hspace=0.34,
+        wspace=0.30,
+        left=0.075,
+        right=0.955,
+        top=0.972,
+        bottom=0.028
     )
 
     title_ax = fig.add_subplot(grid[0, :])
@@ -970,6 +885,5 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
