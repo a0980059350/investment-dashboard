@@ -40,8 +40,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          cp wallpaper.png /tmp/wallpaper.png
+
           git fetch origin main
-          git reset --soft origin/main
+          git reset --hard origin/main
+
+          cp /tmp/wallpaper.png wallpaper.png
 
           git add wallpaper.png
 
