@@ -151,6 +151,15 @@ def parse_fund_value(value):
     return pd.to_numeric(text, errors='coerce')
 
 
+EXCLUDE_VALUE_KEYWORDS = ('累計', '指數', '報酬', '成長', '規模', '配息')
+
+
+def is_valid_value_header(text):
+    return '淨值' in text and not any(
+        keyword in text for keyword in EXCLUDE_VALUE_KEYWORDS
+    )
+
+
 def clean_table(table):
     table = table.copy()
     table.columns = flatten_columns(table.columns)
@@ -161,7 +170,7 @@ def clean_table(table):
     )
 
     value_column = next(
-        (column for column in table.columns if '淨值' in column),
+        (column for column in table.columns if is_valid_value_header(column)),
         None
     )
 
@@ -175,7 +184,7 @@ def clean_table(table):
                 None
             )
             value_pos = next(
-                (index for index, value in enumerate(row_text) if '淨值' in value),
+                (index for index, value in enumerate(row_text) if is_valid_value_header(value)),
                 None
             )
 
@@ -262,11 +271,7 @@ def fetch_fund(url):
             f'基金資料抓取失敗：共找到 {len(tables)} 個表格，但無法辨識日期與淨值'
         )
 
-    data = (
-        pd.concat(candidates, ignore_index=True)
-        .drop_duplicates('Date')
-        .sort_values('Date')
-    )
+    data = max(candidates, key=len).sort_values('Date')
 
     start_date = (
         pd.Timestamp.now(tz=TZ).tz_localize(None)
@@ -970,6 +975,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
 
