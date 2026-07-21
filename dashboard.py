@@ -286,72 +286,54 @@ def fetch_fund(url):
     if len(data) < 2:
         raise RuntimeError('基金資料筆數不足')
 
-    return data
+    high_1y = extract_high_1y_from_tables(tables)
+
+    return data, high_1y
 
 
-def extract_fund_code(url):
-    match = re.search(r'wr02_([A-Za-z0-9]+)-', url)
-    if match:
-        return match.group(1)
-
-    raise ValueError(f'無法從網址解析基金代碼：{url}')
-
-
-def fetch_fund_high_1y(fund_code):
+def extract_high_1y_from_tables(tables):
     """
-    從 MoneyDJ 手機版頁面抓取官方公告的「最高(年)」淨值，
-    比僅用網站有限日線資料（約30天）自行取最大值更準確。
+    直接從基金頁面本身既有的摘要表格
+    （淨值日期／最新淨值／每日變化／最高淨值(年)／最低淨值(年)）
+    取得官方公布的「最高淨值(年)」。
+
+    這比另外呼叫 m.moneydj.com 手機版頁面更可靠，
+    因為手機版頁面時常被 CDN／伺服器端快取住，
+    抓到的可能是好幾週前的舊快照（例如已經漲破前高之後，
+    手機版頁面卻還停留在漲破之前的數字），
+    導致「最高淨值(年)」被系統性低估。
+    改用同一次請求、同一個頁面裡的摘要表格，
+    可以確保跟每日淨值走勢圖用的是同一份、同一時間點的資料。
     """
-    url = f'https://m.moneydj.com/a1.aspx?a={fund_code}'
-    last_error = None
-    response = None
+    for table in tables:
+        columns = flatten_columns(table.columns)
 
-    for attempt in range(3):
-        try:
-            response = requests.get(
-                url,
-                headers={
-                    'User-Agent': (
-                        'Mozilla/5.0 '
-                        '(Linux; Android 13) '
-                        'AppleWebKit/537.36 '
-                        '(KHTML, like Gecko) '
-                        'Chrome/126.0 Mobile Safari/537.36'
-                    ),
-                    'Referer': 'https://m.moneydj.com/',
-                    'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8'
-                },
-                timeout=60
+        # 情況一：標題本身就是欄名
+        for col_index, col in enumerate(columns):
+            if '最高' in col and '淨值' in col and '年' in col:
+                for _, row in table.iterrows():
+                    value = parse_fund_value(row.iloc[col_index])
+                    if pd.notna(value):
+                        return float(value)
+
+        # 情況二：標題放在資料列裡，數值在下一列同一欄位
+        for row_index in range(min(8, len(table) - 1)):
+            row_text = [str(v).strip() for v in table.iloc[row_index].tolist()]
+
+            label_pos = next(
+                (
+                    i for i, v in enumerate(row_text)
+                    if '最高' in v and '淨值' in v and '年' in v
+                ),
+                None
             )
-            response.raise_for_status()
 
-            if not response.encoding or response.encoding.lower() == 'iso-8859-1':
-                response.encoding = response.apparent_encoding
+            if label_pos is not None:
+                value = parse_fund_value(table.iloc[row_index + 1, label_pos])
+                if pd.notna(value):
+                    return float(value)
 
-            break
-
-        except Exception as error:
-            last_error = error
-            print(
-                f'基金手機版頁面抓取失敗 {fund_code}，'
-                f'第 {attempt + 1} 次：',
-                repr(error)
-            )
-            time.sleep(3)
-    else:
-        raise RuntimeError(
-            f'基金手機版頁面連線失敗：{last_error}'
-        )
-
-    match = re.search(
-        r'最高\(年\)[^\d]{0,20}([\d,]+\.\d+)',
-        response.text
-    )
-
-    if not match:
-        raise RuntimeError('找不到最高(年)欄位')
-
-    return float(match.group(1).replace(',', ''))
+    return None
 
 
 
@@ -894,18 +876,13 @@ def main():
 
     for ax, fund in zip(fund_axes, FUNDS):
         try:
-            fund_data = fetch_fund(fund['url'])
+            fund_data, high_1y = fetch_fund(fund['url'])
 
-            try:
-                fund_code = extract_fund_code(fund['url'])
-                high_1y = fetch_fund_high_1y(fund_code)
-            except Exception as high_error:
+            if high_1y is None:
                 print(
-                    '官方最高(年)抓取失敗，改用近期資料估算:',
-                    fund['name'],
-                    repr(high_error)
+                    '官方最高淨值(年)抓取失敗，改用近期資料估算:',
+                    fund['name']
                 )
-                high_1y = None
 
             plot_fund(
                 ax,
@@ -1006,4 +983,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
