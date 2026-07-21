@@ -289,95 +289,6 @@ def fetch_fund(url):
     return data
 
 
-def extract_fund_code(url):
-    match = re.search(r'wr02_([A-Za-z0-9]+)-', url)
-    if match:
-        return match.group(1)
-
-    raise ValueError(f'無法從網址解析基金代碼：{url}')
-
-
-def fetch_fund_return_1y(fund_code):
-    """
-    從 MoneyDJ 績效表頁面抓取基金公司公告的正式「一年」報酬率，
-    避免用網站上有限的日線資料（僅約30天）自行推算造成失真。
-    """
-    url = f'https://www.moneydj.com/funddj/yp/yp012000.djhtm?a={fund_code}'
-    last_error = None
-    response = None
-
-    for attempt in range(3):
-        try:
-            response = requests.get(
-                url,
-                headers={
-                    'User-Agent': (
-                        'Mozilla/5.0 '
-                        '(Linux; Android 13) '
-                        'AppleWebKit/537.36 '
-                        '(KHTML, like Gecko) '
-                        'Chrome/126.0 Mobile Safari/537.36'
-                    ),
-                    'Referer': 'https://www.moneydj.com/',
-                    'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8'
-                },
-                timeout=60
-            )
-            response.raise_for_status()
-
-            if not response.encoding or response.encoding.lower() == 'iso-8859-1':
-                response.encoding = response.apparent_encoding
-
-            break
-
-        except Exception as error:
-            last_error = error
-            print(
-                f'基金績效表抓取失敗 {fund_code}，'
-                f'第 {attempt + 1} 次：',
-                repr(error)
-            )
-            time.sleep(3)
-    else:
-        raise RuntimeError(
-            f'基金績效表連線失敗：{last_error}'
-        )
-
-    try:
-        tables = pd.read_html(StringIO(response.text))
-    except Exception as error:
-        raise RuntimeError(
-            f'基金績效表解析失敗：{error}'
-        )
-
-    for table in tables:
-        columns = flatten_columns(table.columns)
-        table.columns = columns
-
-        one_year_column = next(
-            (column for column in columns if column.strip() == '一年'),
-            None
-        )
-
-        if one_year_column is None:
-            continue
-
-        date_match = None
-        for column in columns:
-            match = re.search(r'\((\d{1,2}/\d{1,2})\)', column)
-            if match:
-                date_match = match.group(1)
-                break
-
-        for _, row in table.iterrows():
-            raw_value = str(row[one_year_column]).strip()
-            raw_value = raw_value.replace(',', '').replace('%', '')
-
-            value = pd.to_numeric(raw_value, errors='coerce')
-            if pd.notna(value):
-                return float(value) / 100, date_match
-
-    raise RuntimeError('找不到一年報酬率欄位')
 
 
 def fetch_etf(ticker):
@@ -465,93 +376,6 @@ def fetch_etf(ticker):
         'daily_raw': daily_raw_close
     }
 
-
-def fetch_etf_return_1y(ticker):
-    """
-    從 MoneyDJ ETF報酬分析頁面抓取「市價」的官方一年報酬率，
-    避免用yfinance有限的日線資料自行推算造成失真。
-    """
-    url = f'https://www.moneydj.com/etf/x/basic/basic0008.xdjhtm?etfid={ticker}'
-    last_error = None
-    response = None
-
-    for attempt in range(3):
-        try:
-            response = requests.get(
-                url,
-                headers={
-                    'User-Agent': (
-                        'Mozilla/5.0 '
-                        '(Linux; Android 13) '
-                        'AppleWebKit/537.36 '
-                        '(KHTML, like Gecko) '
-                        'Chrome/126.0 Mobile Safari/537.36'
-                    ),
-                    'Referer': 'https://www.moneydj.com/',
-                    'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8'
-                },
-                timeout=60
-            )
-            response.raise_for_status()
-
-            if not response.encoding or response.encoding.lower() == 'iso-8859-1':
-                response.encoding = response.apparent_encoding
-
-            break
-
-        except Exception as error:
-            last_error = error
-            print(
-                f'ETF報酬分析抓取失敗 {ticker}，'
-                f'第 {attempt + 1} 次：',
-                repr(error)
-            )
-            time.sleep(3)
-    else:
-        raise RuntimeError(
-            f'ETF報酬分析連線失敗：{last_error}'
-        )
-
-    try:
-        tables = pd.read_html(StringIO(response.text))
-    except Exception as error:
-        raise RuntimeError(
-            f'ETF報酬分析解析失敗：{error}'
-        )
-
-    for table in tables:
-        columns = flatten_columns(table.columns)
-        table.columns = columns
-
-        one_year_column = next(
-            (column for column in columns if column.strip() == '一年'),
-            None
-        )
-
-        if one_year_column is None or not columns:
-            continue
-
-        label_column = columns[0]
-
-        for _, row in table.iterrows():
-            label = str(row[label_column]).strip()
-
-            if not label.startswith('市價'):
-                continue
-
-            date_match = None
-            match = re.search(r'\((\d{1,2}/\d{1,2})\)', label)
-            if match:
-                date_match = match.group(1)
-
-            raw_value = str(row[one_year_column]).strip()
-            raw_value = raw_value.replace(',', '').replace('%', '')
-
-            value = pd.to_numeric(raw_value, errors='coerce')
-            if pd.notna(value):
-                return float(value) / 100, date_match
-
-    raise RuntimeError('找不到ETF一年報酬率欄位')
 
 
 def is_week_complete(period_end):
@@ -718,15 +542,12 @@ def style_card(ax):
     corner_brackets(ax)
 
 
-def plot_fund(ax, name, data, return_info, fig):
+def plot_fund(ax, name, data, fig):
     x = np.arange(len(data))
     latest, high, drawdown, _ = date_based_stats(
         data['Date'],
         data['Value']
     )
-
-    return_rate, return_date = return_info
-    return_date_label = f'（{return_date}資料）' if return_date else ''
 
     style_card(ax)
 
@@ -764,8 +585,7 @@ def plot_fund(ax, name, data, return_info, fig):
         (
             f'最新淨值 {latest:.2f}\n'
             f'最高淨值 {high:.2f}\n'
-            f'回撤 {drawdown:.1%}\n'
-            f'近一年報酬率 {return_rate:+.1%}{return_date_label}'
+            f'回撤 {drawdown:.1%}'
         ),
         transform=ax.transAxes,
         ha='right',
@@ -789,7 +609,7 @@ def plot_fund(ax, name, data, return_info, fig):
     ax.tick_params(labelbottom=False)
 
 
-def plot_etf(ax, name, etf_bundle, ema_period, return_info, fig):
+def plot_etf(ax, name, etf_bundle, ema_period, fig):
     data = etf_bundle['weekly']
     x = np.arange(len(data))
 
@@ -809,8 +629,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, return_info, fig):
         etf_bundle['daily_adj'].values
     )
 
-    return_rate, return_date = return_info
-    return_date_label = f'（{return_date}資料）' if return_date else ''
+    stop = high * 0.8
 
     style_card(ax)
 
@@ -896,8 +715,8 @@ def plot_etf(ax, name, etf_bundle, ema_period, return_info, fig):
         (
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
-            f'回撤 {drawdown:.1%}\n'
-            f'近一年報酬率 {return_rate:+.1%}{return_date_label}'
+            f'停損價 {stop:.2f}\n'
+            f'回撤 {drawdown:.1%}'
         ),
         transform=ax.transAxes,
         ha='right',
@@ -1007,26 +826,10 @@ def main():
         try:
             fund_data = fetch_fund(fund['url'])
 
-            try:
-                fund_code = extract_fund_code(fund['url'])
-                return_info = fetch_fund_return_1y(fund_code)
-            except Exception as return_error:
-                print(
-                    '官方一年報酬率抓取失敗，改用資料自行估算:',
-                    fund['name'],
-                    repr(return_error)
-                )
-                _, _, _, estimated_rate = date_based_stats(
-                    fund_data['Date'],
-                    fund_data['Value']
-                )
-                return_info = (estimated_rate, '估算')
-
             plot_fund(
                 ax,
                 fund['name'],
                 fund_data,
-                return_info,
                 fig
             )
 
@@ -1067,26 +870,11 @@ def main():
         try:
             etf_data = fetch_etf(etf['ticker'])
 
-            try:
-                return_info = fetch_etf_return_1y(etf['ticker'])
-            except Exception as return_error:
-                print(
-                    'ETF官方一年報酬率抓取失敗，改用資料自行估算:',
-                    etf['name'],
-                    repr(return_error)
-                )
-                _, _, _, estimated_rate = date_based_stats(
-                    etf_data['daily_adj'].index,
-                    etf_data['daily_adj'].values
-                )
-                return_info = (estimated_rate, '估算')
-
             plot_etf(
                 ax,
                 etf['name'],
                 etf_data,
                 etf['ema'],
-                return_info,
                 fig
             )
 
