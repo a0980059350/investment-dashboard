@@ -25,11 +25,11 @@ OUTPUT = 'wallpaper.png'
 FUNDS = [
     {
         'name': '安聯科技',
-        'url': 'https://fund.hncb.com.tw/w/wr/wr02_ACDD04-005003.djhtm'
+        'url': 'https://www.moneydj.com/funddj/ya/yp010000.djhtm?a=ACDD04'
     },
     {
         'name': '統一科技',
-        'url': 'https://fund.hncb.com.tw/w/wr/wr02_ACPS38-009022.djhtm'
+        'url': 'https://www.moneydj.com/funddj/ya/yp010000.djhtm?a=ACPS38'
     }
 ]
 
@@ -225,7 +225,7 @@ def fetch_fund(url):
                         '(KHTML, like Gecko) '
                         'Chrome/126.0 Mobile Safari/537.36'
                     ),
-                    'Referer': 'https://fund.hncb.com.tw/',
+                    'Referer': 'https://www.moneydj.com/',
                     'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8'
                 },
                 timeout=60
@@ -983,5 +983,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
