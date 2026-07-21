@@ -312,10 +312,10 @@ def extract_high_1y_from_raw_html(html_text):
 
     match = re.search(
         r'最高淨值\s*\(\s*年\s*\).{0,300}?'
-        r'(\d{4}/\d{1,2}/\d{1,2})\s*'
-        r'([\d,]+\.\d+)\s*'
-        r'[+\-]?([\d,]+\.\d+)\s*'
-        r'([\d,]+\.\d+)\s*'
+        r'(\d{4}[/\-]\d{1,2}[/\-]\d{1,2})[^\d]{0,15}'
+        r'([\d,]+\.\d+)[^\d]{0,15}'
+        r'([\d,]+\.\d+)[^\d]{0,15}'
+        r'([\d,]+\.\d+)[^\d]{0,15}'
         r'([\d,]+\.\d+)',
         text
     )
@@ -325,6 +325,15 @@ def extract_high_1y_from_raw_html(html_text):
             return float(match.group(4).replace(',', ''))
         except ValueError:
             pass
+
+    label_pos = text.find('最高淨值')
+    if label_pos != -1:
+        print(
+            '[debug] 最高淨值(年) 附近文字：',
+            text[label_pos:label_pos + 200]
+        )
+    else:
+        print('[debug] 網頁純文字裡完全找不到「最高淨值」這個字串')
 
     return None
 
@@ -1021,6 +1030,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
