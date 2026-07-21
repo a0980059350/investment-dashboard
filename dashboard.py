@@ -288,7 +288,45 @@ def fetch_fund(url):
 
     high_1y = extract_high_1y_from_tables(tables)
 
+    if high_1y is None:
+        high_1y = extract_high_1y_from_raw_html(response.text)
+
     return data, high_1y
+
+
+def extract_high_1y_from_raw_html(html_text):
+    """
+    後備方案：不依賴 pd.read_html 解析出來的表格物件，
+    直接在整個網頁原始碼的「純文字」上找「淨值日期／最新淨值／
+    每日變化／最高淨值(年)／最低淨值(年)」這組標籤，
+    然後找緊接在後面的一組「日期 + 4 個數字」。
+
+    這是因為這個摘要區塊在某些頁面版本裡，可能不是用標準
+    <table> 標籤排版（例如改成 div 網格），導致 pd.read_html
+    完全看不到它、只抓得到下面的近30日歷史表格。
+    直接對純文字做比對可以不受標籤結構影響。
+    """
+    text = re.sub(r'<[^>]+>', ' ', html_text)
+    text = re.sub(r'&nbsp;?', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+
+    match = re.search(
+        r'最高淨值\s*\(\s*年\s*\).{0,300}?'
+        r'(\d{4}/\d{1,2}/\d{1,2})\s*'
+        r'([\d,]+\.\d+)\s*'
+        r'[+\-]?([\d,]+\.\d+)\s*'
+        r'([\d,]+\.\d+)\s*'
+        r'([\d,]+\.\d+)',
+        text
+    )
+
+    if match:
+        try:
+            return float(match.group(4).replace(',', ''))
+        except ValueError:
+            pass
+
+    return None
 
 
 def extract_high_1y_from_tables(tables):
