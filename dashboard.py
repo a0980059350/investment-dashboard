@@ -1,4 +1,4 @@
-import os, re, time
+import os, re, time, json
 from datetime import datetime
 from io import StringIO
 from zoneinfo import ZoneInfo
@@ -20,6 +20,7 @@ from matplotlib.transforms import IdentityTransform
 
 TZ = ZoneInfo('Asia/Taipei')
 OUTPUT = 'wallpaper.png'
+HISTORY_FILE = 'history.json'
 
 
 FUNDS = [
@@ -286,103 +287,74 @@ def fetch_fund(url):
     if len(data) < 2:
         raise RuntimeError('基金資料筆數不足')
 
-    high_1y = extract_high_1y_from_tables(tables)
-
-    if high_1y is None:
-        high_1y = extract_high_1y_from_raw_html(response.text)
-
-    return data, high_1y
+    return data
 
 
-def extract_high_1y_from_raw_html(html_text):
+def load_history():
     """
-    後備方案：不依賴 pd.read_html 解析出來的表格物件，
-    直接在整個網頁原始碼的「純文字」上找「淨值日期／最新淨值／
-    每日變化／最高淨值(年)／最低淨值(年)」這組標籤，
-    然後找緊接在後面的一組「日期 + 4 個數字」。
-
-    這是因為這個摘要區塊在某些頁面版本裡，可能不是用標準
-    <table> 標籤排版（例如改成 div 網格），導致 pd.read_html
-    完全看不到它、只抓得到下面的近30日歷史表格。
-    直接對純文字做比對可以不受標籤結構影響。
+    讀取先前累積的每日淨值歷史紀錄（跨每次 workflow 執行持續保存）。
+    找不到檔案或內容損毀時，回傳空字典，之後會自然從頭開始累積。
     """
-    text = re.sub(r'<[^>]+>', ' ', html_text)
-    text = re.sub(r'&nbsp;?', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
+    if not os.path.exists(HISTORY_FILE):
+        return {}
 
-    match = re.search(
-        r'最高淨值\s*\(\s*年\s*\).{0,300}?'
-        r'(\d{4}[/\-]\d{1,2}[/\-]\d{1,2})[^\d]{0,15}'
-        r'([\d,]+\.\d+)[^\d]{0,15}'
-        r'([\d,]+\.\d+)[^\d]{0,15}'
-        r'([\d,]+\.\d+)[^\d]{0,15}'
-        r'([\d,]+\.\d+)',
-        text
+    try:
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as file:
+            return json.load(file)
+    except Exception as error:
+        print('讀取歷史紀錄失敗，改用空白重新累積：', repr(error))
+        return {}
+
+
+def save_history(history):
+    try:
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as file:
+            json.dump(history, file, ensure_ascii=False)
+    except Exception as error:
+        print('寫入歷史紀錄失敗：', repr(error))
+
+
+def update_history_and_get_high(history, fund_name, data):
+    """
+    把這次抓到的每日淨值併入長期歷史紀錄裡，
+    並回傳「自從開始累積以來，最近一年內」看過的最高值。
+
+    這個做法不依賴任何網站提供的「最高淨值(年)」欄位
+    （那個欄位常常是網頁用 JavaScript 動態載入的，
+    requests 抓不到），改成每次執行都把當下抓到的
+    每日淨值記錄下來，自己長期滾動累積出正確的一年高點。
+    """
+    fund_history = history.get(fund_name, {})
+
+    for _, row in data.iterrows():
+        date_key = row['Date'].strftime('%Y-%m-%d')
+        fund_history[date_key] = float(row['Value'])
+
+    cutoff = (
+        pd.Timestamp.now(tz=TZ).tz_localize(None)
+        - pd.Timedelta(days=400)
     )
 
-    if match:
-        try:
-            return float(match.group(4).replace(',', ''))
-        except ValueError:
-            pass
+    fund_history = {
+        date_key: value
+        for date_key, value in fund_history.items()
+        if pd.to_datetime(date_key) >= cutoff
+    }
 
-    label_pos = text.find('最高淨值')
-    if label_pos != -1:
-        print(
-            '[debug] 最高淨值(年) 附近文字：',
-            text[label_pos:label_pos + 200]
-        )
-    else:
-        print('[debug] 網頁純文字裡完全找不到「最高淨值」這個字串')
+    history[fund_name] = fund_history
 
-    return None
+    one_year_ago = (
+        pd.Timestamp.now(tz=TZ).tz_localize(None)
+        - pd.Timedelta(days=365)
+    )
 
+    recent_values = [
+        value
+        for date_key, value in fund_history.items()
+        if pd.to_datetime(date_key) >= one_year_ago
+    ]
 
-def extract_high_1y_from_tables(tables):
-    """
-    直接從基金頁面本身既有的摘要表格
-    （淨值日期／最新淨值／每日變化／最高淨值(年)／最低淨值(年)）
-    取得官方公布的「最高淨值(年)」。
-
-    這比另外呼叫 m.moneydj.com 手機版頁面更可靠，
-    因為手機版頁面時常被 CDN／伺服器端快取住，
-    抓到的可能是好幾週前的舊快照（例如已經漲破前高之後，
-    手機版頁面卻還停留在漲破之前的數字），
-    導致「最高淨值(年)」被系統性低估。
-    改用同一次請求、同一個頁面裡的摘要表格，
-    可以確保跟每日淨值走勢圖用的是同一份、同一時間點的資料。
-    """
-    for table in tables:
-        columns = flatten_columns(table.columns)
-
-        # 情況一：標題本身就是欄名
-        for col_index, col in enumerate(columns):
-            if '最高' in col and '淨值' in col and '年' in col:
-                for _, row in table.iterrows():
-                    value = parse_fund_value(row.iloc[col_index])
-                    if pd.notna(value):
-                        return float(value)
-
-        # 情況二：標題放在資料列裡，數值在下一列同一欄位
-        for row_index in range(min(8, len(table) - 1)):
-            row_text = [str(v).strip() for v in table.iloc[row_index].tolist()]
-
-            label_pos = next(
-                (
-                    i for i, v in enumerate(row_text)
-                    if '最高' in v and '淨值' in v and '年' in v
-                ),
-                None
-            )
-
-            if label_pos is not None:
-                value = parse_fund_value(table.iloc[row_index + 1, label_pos])
-                if pd.notna(value):
-                    return float(value)
-
-    return None
-
-
+    return max(recent_values) if recent_values else None
 
 
 def fetch_etf(ticker):
@@ -921,15 +893,17 @@ def main():
         fig.add_subplot(grid[2, 1])
     ]
 
+    history = load_history()
+
     for ax, fund in zip(fund_axes, FUNDS):
         try:
-            fund_data, high_1y = fetch_fund(fund['url'])
+            fund_data = fetch_fund(fund['url'])
 
-            if high_1y is None:
-                print(
-                    '官方最高淨值(年)抓取失敗，改用近期資料估算:',
-                    fund['name']
-                )
+            high_1y = update_history_and_get_high(
+                history,
+                fund['name'],
+                fund_data
+            )
 
             plot_fund(
                 ax,
@@ -971,6 +945,8 @@ def main():
                 color=TEXT_DIM,
                 transform=ax.transAxes
             )
+
+    save_history(history)
 
     for ax, etf in zip(etf_axes, ETFS):
         try:
