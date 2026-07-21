@@ -289,6 +289,71 @@ def fetch_fund(url):
     return data
 
 
+def extract_fund_code(url):
+    match = re.search(r'wr02_([A-Za-z0-9]+)-', url)
+    if match:
+        return match.group(1)
+
+    raise ValueError(f'無法從網址解析基金代碼：{url}')
+
+
+def fetch_fund_high_1y(fund_code):
+    """
+    從 MoneyDJ 手機版頁面抓取官方公告的「最高(年)」淨值，
+    比僅用網站有限日線資料（約30天）自行取最大值更準確。
+    """
+    url = f'https://m.moneydj.com/a1.aspx?a={fund_code}'
+    last_error = None
+    response = None
+
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                url,
+                headers={
+                    'User-Agent': (
+                        'Mozilla/5.0 '
+                        '(Linux; Android 13) '
+                        'AppleWebKit/537.36 '
+                        '(KHTML, like Gecko) '
+                        'Chrome/126.0 Mobile Safari/537.36'
+                    ),
+                    'Referer': 'https://m.moneydj.com/',
+                    'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8'
+                },
+                timeout=60
+            )
+            response.raise_for_status()
+
+            if not response.encoding or response.encoding.lower() == 'iso-8859-1':
+                response.encoding = response.apparent_encoding
+
+            break
+
+        except Exception as error:
+            last_error = error
+            print(
+                f'基金手機版頁面抓取失敗 {fund_code}，'
+                f'第 {attempt + 1} 次：',
+                repr(error)
+            )
+            time.sleep(3)
+    else:
+        raise RuntimeError(
+            f'基金手機版頁面連線失敗：{last_error}'
+        )
+
+    match = re.search(
+        r'最高\(年\)[^\d]{0,20}([\d,]+\.\d+)',
+        response.text
+    )
+
+    if not match:
+        raise RuntimeError('找不到最高(年)欄位')
+
+    return float(match.group(1).replace(',', ''))
+
+
 
 
 def fetch_etf(ticker):
@@ -542,12 +607,16 @@ def style_card(ax):
     corner_brackets(ax)
 
 
-def plot_fund(ax, name, data, fig):
+def plot_fund(ax, name, data, high_1y, fig):
     x = np.arange(len(data))
-    latest, high, drawdown, _ = date_based_stats(
+    latest, local_high, _, _ = date_based_stats(
         data['Date'],
         data['Value']
     )
+
+    high = high_1y if high_1y is not None else local_high
+    drawdown = latest / high - 1
+    add_price = high * 0.8
 
     style_card(ax)
 
@@ -561,10 +630,10 @@ def plot_fund(ax, name, data, fig):
     )
 
     y_min, y_max = ax.get_ylim()
-    data_range = high - y_min
+    data_range = local_high - y_min
     ax.set_ylim(
         y_min - data_range * 0.12,
-        high + data_range * 0.14
+        local_high + data_range * 0.14
     )
 
     is_up = abs(drawdown) > 0.20
@@ -585,6 +654,7 @@ def plot_fund(ax, name, data, fig):
         (
             f'最新淨值 {latest:.2f}\n'
             f'最高淨值 {high:.2f}\n'
+            f'加碼價 {add_price:.2f}\n'
             f'回撤 {drawdown:.1%}'
         ),
         transform=ax.transAxes,
@@ -826,10 +896,22 @@ def main():
         try:
             fund_data = fetch_fund(fund['url'])
 
+            try:
+                fund_code = extract_fund_code(fund['url'])
+                high_1y = fetch_fund_high_1y(fund_code)
+            except Exception as high_error:
+                print(
+                    '官方最高(年)抓取失敗，改用近期資料估算:',
+                    fund['name'],
+                    repr(high_error)
+                )
+                high_1y = None
+
             plot_fund(
                 ax,
                 fund['name'],
                 fund_data,
+                high_1y,
                 fig
             )
 
