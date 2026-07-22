@@ -656,7 +656,7 @@ def quarterly_month_ticks(dates):
 
         if len(matches) > 0:
             positions.append(int(matches[0]))
-            labels.append(f'{target_period.month}月')
+            labels.append(str(target_period.month))
 
         target_period -= 3
 
@@ -717,8 +717,8 @@ def plot_fund(ax, name, data, high_1y, fig):
         0.06,
         (
             f'漲跌幅 {change_pct:+.2%}\n'
-            f'最新淨值 {latest:.2f}\n'
-            f'最高淨值 {high:.2f}\n'
+            f'最新價 {latest:.2f}\n'
+            f'最高價 {high:.2f}\n'
             f'加碼價 {add_price:.2f}\n'
             f'回撤 {drawdown:.1%}'
         ),
