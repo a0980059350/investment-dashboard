@@ -69,6 +69,9 @@ TEXT_DIM = '#c9b979'
 LIGHT_GREEN = '#3ddc84'
 LIGHT_GREEN_EDGE = '#7cffb5'
 
+LIGHT_YELLOW = '#ffd23d'
+LIGHT_YELLOW_EDGE = '#fff0a8'
+
 LIGHT_RED = '#ff4d4d'
 LIGHT_RED_EDGE = '#ffb3b3'
 
@@ -583,9 +586,14 @@ def corner_brackets(ax, frac=0.045, lw=2.6, color=GOLD_BRIGHT):
         )
 
 
-def draw_signal_light(fig, ax, up, label=None, x=0.92, y=0.965, r_px=20):
-    fill = LIGHT_GREEN if up else LIGHT_RED
-    edge = LIGHT_GREEN_EDGE if up else LIGHT_RED_EDGE
+def draw_signal_light(fig, ax, state, label=None, x=0.92, y=0.965, r_px=20):
+    colors = {
+        'green': (LIGHT_GREEN, LIGHT_GREEN_EDGE),
+        'yellow': (LIGHT_YELLOW, LIGHT_YELLOW_EDGE),
+        'red': (LIGHT_RED, LIGHT_RED_EDGE)
+    }
+
+    fill, edge = colors[state]
 
     if label:
         ax.text(
@@ -700,8 +708,17 @@ def plot_fund(ax, name, data, high_1y, fig):
         local_high + data_range * 0.14
     )
 
-    is_up = abs(drawdown) > 0.20
-    fund_status = '可以加碼' if is_up else '暫停加碼'
+    abs_drawdown = abs(drawdown)
+
+    if abs_drawdown > 0.20:
+        fund_state = 'green'
+        fund_status = '可以加碼'
+    elif abs_drawdown > 0.10:
+        fund_state = 'yellow'
+        fund_status = '觀察加碼'
+    else:
+        fund_state = 'red'
+        fund_status = '暫停加碼'
 
     ax.set_title(
         name,
@@ -737,7 +754,7 @@ def plot_fund(ax, name, data, high_1y, fig):
         )
     )
 
-    draw_signal_light(fig, ax, is_up, label=fund_status)
+    draw_signal_light(fig, ax, fund_state, label=fund_status)
 
     ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
     ax.set_xlim(0, max(1, len(x) - 1))
@@ -841,12 +858,18 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
     signal_close = float(data['Close'].iloc[signal_index])
     signal_ema = float(ema.iloc[signal_index])
 
-    is_up = signal_close > signal_ema
-    status = (
-        f'站上{ema_period}週線'
-        if is_up
-        else f'跌破{ema_period}週線'
-    )
+    above_ema = signal_close > signal_ema
+    abs_drawdown = abs(drawdown)
+
+    if not above_ema:
+        etf_state = 'red'
+        status = f'跌破{ema_period}週線'
+    elif abs_drawdown > 0.20:
+        etf_state = 'yellow'
+        status = f'站上{ema_period}週線'
+    else:
+        etf_state = 'green'
+        status = f'站上{ema_period}週線'
 
     ax.set_title(
         name,
@@ -882,7 +905,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         )
     )
 
-    draw_signal_light(fig, ax, is_up, label=status)
+    draw_signal_light(fig, ax, etf_state, label=status)
 
     ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
     ax.set_xlim(-1, len(x))
