@@ -630,6 +630,42 @@ def style_card(ax):
     corner_brackets(ax)
 
 
+def quarterly_month_ticks(dates):
+    """
+    找出「當月」以及往前每隔3個月的月份，回傳可以直接
+    丟給 ax.set_xticks / set_xticklabels 用的（位置, 標籤）。
+
+    例如資料最新到7月，就會標 7月、4月、1月、去年10月...
+    一路往前推到資料的起始月份為止。
+    """
+    dates = pd.DatetimeIndex(pd.to_datetime(dates))
+
+    if len(dates) == 0:
+        return [], []
+
+    periods = dates.to_period('M')
+    earliest_period = periods.min()
+
+    positions = []
+    labels = []
+
+    target_period = periods[-1]
+
+    while target_period >= earliest_period:
+        matches = np.where(periods == target_period)[0]
+
+        if len(matches) > 0:
+            positions.append(int(matches[0]))
+            labels.append(f'{target_period.month}月')
+
+        target_period -= 3
+
+    positions.reverse()
+    labels.reverse()
+
+    return positions, labels
+
+
 def plot_fund(ax, name, data, high_1y, fig):
     x = np.arange(len(data))
     latest, local_high, _, _ = date_based_stats(
@@ -705,7 +741,17 @@ def plot_fund(ax, name, data, high_1y, fig):
 
     ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
     ax.set_xlim(0, max(1, len(x) - 1))
-    ax.tick_params(labelbottom=False)
+
+    tick_positions, tick_labels = quarterly_month_ticks(data['Date'])
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels)
+    ax.tick_params(
+        axis='x',
+        labelbottom=True,
+        labelsize=20,
+        colors=TEXT_DIM,
+        length=0
+    )
 
 
 def plot_etf(ax, name, etf_bundle, ema_period, fig):
@@ -840,7 +886,17 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
 
     ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
     ax.set_xlim(-1, len(x))
-    ax.tick_params(labelbottom=False)
+
+    tick_positions, tick_labels = quarterly_month_ticks(data.index)
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels)
+    ax.tick_params(
+        axis='x',
+        labelbottom=True,
+        labelsize=20,
+        colors=TEXT_DIM,
+        length=0
+    )
 
 
 def add_vignette(fig):
