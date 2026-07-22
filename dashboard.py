@@ -691,14 +691,11 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
     )
 
     latest, high = latest_and_high(
-        etf_bundle['daily_raw'].index,
-        etf_bundle['daily_raw'].values
-    )
-
-    _, _, drawdown, _ = date_based_stats(
         etf_bundle['daily_adj'].index,
         etf_bundle['daily_adj'].values
     )
+
+    drawdown = latest / high - 1
 
     stop = high * 0.8
 
