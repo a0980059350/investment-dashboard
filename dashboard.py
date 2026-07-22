@@ -357,6 +357,28 @@ def update_history_and_get_high(history, fund_name, data):
     return max(recent_values) if recent_values else None
 
 
+def history_to_chart_data(fund_history):
+    """
+    把累積的歷史紀錄轉換成可以直接拿去畫圖的 DataFrame。
+
+    一開始（累積天數還不多）畫出來的線就只會是這幾天的資料，
+    但隨著 workflow 每天持續執行，累積的天數會越來越多，
+    最多滾動保留約 400 天，畫出來的線會逐漸變成完整一年走勢圖，
+    不再受限於網站本身只提供近30日資料的限制。
+    """
+    if not fund_history:
+        return pd.DataFrame(columns=['Date', 'Value'])
+
+    dates = pd.to_datetime(list(fund_history.keys()))
+    values = list(fund_history.values())
+
+    return (
+        pd.DataFrame({'Date': dates, 'Value': values})
+        .sort_values('Date')
+        .reset_index(drop=True)
+    )
+
+
 def fetch_etf(ticker):
     data = pd.DataFrame()
     raw_data = pd.DataFrame()
@@ -619,6 +641,11 @@ def plot_fund(ax, name, data, high_1y, fig):
     drawdown = latest / high - 1
     add_price = high * 0.8
 
+    if len(data) >= 2:
+        change_pct = data['Value'].iloc[-1] / data['Value'].iloc[-2] - 1
+    else:
+        change_pct = 0.0
+
     style_card(ax)
 
     ax.plot(
@@ -653,6 +680,7 @@ def plot_fund(ax, name, data, high_1y, fig):
         0.97,
         0.06,
         (
+            f'漲跌幅 {change_pct:+.2%}\n'
             f'最新淨值 {latest:.2f}\n'
             f'最高淨值 {high:.2f}\n'
             f'加碼價 {add_price:.2f}\n'
@@ -698,6 +726,12 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
     drawdown = latest / high - 1
 
     stop = high * 0.8
+
+    daily_adj = etf_bundle['daily_adj'].dropna()
+    if len(daily_adj) >= 2:
+        change_pct = daily_adj.iloc[-1] / daily_adj.iloc[-2] - 1
+    else:
+        change_pct = 0.0
 
     style_card(ax)
 
@@ -781,6 +815,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         0.97,
         0.06,
         (
+            f'漲跌幅 {change_pct:+.2%}\n'
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
             f'停損價 {stop:.2f}\n'
@@ -902,10 +937,14 @@ def main():
                 fund_data
             )
 
+            chart_data = history_to_chart_data(
+                history[fund['name']]
+            )
+
             plot_fund(
                 ax,
                 fund['name'],
-                fund_data,
+                chart_data,
                 high_1y,
                 fig
             )
