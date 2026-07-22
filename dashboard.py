@@ -866,7 +866,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         status = f'跌破{ema_period}週線'
     elif abs_drawdown > 0.20:
         etf_state = 'yellow'
-        status = f'站上{ema_period}週線'
+        status = '暫時離場'
     else:
         etf_state = 'green'
         status = f'站上{ema_period}週線'
