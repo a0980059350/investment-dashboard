@@ -3,14 +3,7 @@ name: Update Dashboard
 on:
   workflow_dispatch:
   schedule:
-    - cron: '38 8 * * *'
-    - cron: '38 9 * * *'
-    - cron: '38 10 * * *'
-    - cron: '38 11 * * *'
-    - cron: '38 12 * * *'
-    - cron: '38 13 * * *'
-    - cron: '38 14 * * *'
-    - cron: '38 15 * * *'
+    - cron: '5,15,25,35,45,55 7-15 * * *'
 
 permissions:
   contents: write
