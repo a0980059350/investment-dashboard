@@ -705,7 +705,7 @@ def fetch_market_overview(history):
     except Exception as error:
         print('加權指數抓取失敗：', repr(error))
 
-    # ---- 大盤波動率（20日年化歷史波動率，log return）----
+    # ---- 大盤波動率（20日年化歷史波動率，簡單報酬率pct_change，跟回測邏輯一致）----
     try:
         twii_hist = yf.download(
             '^TWII', period='3mo', interval='1d',
@@ -715,9 +715,7 @@ def fetch_market_overview(history):
         if isinstance(twii_hist.columns, pd.MultiIndex):
             twii_hist.columns = twii_hist.columns.get_level_values(0)
 
-        twii_ret = np.log(
-            twii_hist['Close'] / twii_hist['Close'].shift(1)
-        ).dropna()
+        twii_ret = twii_hist['Close'].pct_change().dropna()
 
         result['market_vol'] = float(
             twii_ret.tail(20).std() * np.sqrt(252) * 100
