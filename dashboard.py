@@ -1572,8 +1572,8 @@ def main():
 
     metric_rows = [
         ('大盤本益比', market['market_pe'], '', 'pe', ''),
-        ('大盤融資維持率', market['margin_ratio'], '%', 'margin', ''),
         ('大盤波動率', market['market_vol'], '%', 'vol', ''),
+        ('大盤融資維持率', market['margin_ratio'], '%', 'margin', ''),
     ]
 
     row_ys = [0.63, 0.36, 0.09]
@@ -1726,6 +1726,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
