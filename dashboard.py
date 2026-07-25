@@ -596,6 +596,13 @@ def fetch_market_margin_ratio():
         price_resp.raise_for_status()
         price_rows = price_resp.json()
 
+        numerator_date = None
+        if price_rows:
+            numerator_date = price_rows[0].get('Date')
+        print(f'[融資維持率] 分子日期(STOCK_DAY_ALL) = {numerator_date}，分母日期(MS) = {matched_date}')
+        if numerator_date and matched_date and str(numerator_date) != str(matched_date):
+            print('[融資維持率] 警告：分子與分母不是同一天，計算結果可能有落差')
+
         close_prices = {}
         for row in price_rows:
             try:
@@ -626,7 +633,51 @@ def fetch_market_margin_ratio():
         return None
 
 
-def fetch_market_overview():
+def update_market_pe_history(history, pe_value):
+    """
+    把每次算出來的大盤本益比累積進歷史紀錄，滾動計算近5年平均值與標準差。
+    這是用「自己累積」的方式做的，不是抓現成的5年歷史本益比資料庫（免費資料源沒有這個）。
+    剛開始累積天數還不夠5年時，樣本數會偏少，回傳的平均/標準差僅供參考，
+    等 workflow 累積跑得夠久（理論上要滿5年）數字才會真正穩定。
+    """
+    key = '大盤本益比'
+    pe_hist = history.get(key, {})
+
+    if pe_value is not None:
+        today_str = datetime.now(TZ).strftime('%Y-%m-%d')
+        pe_hist[today_str] = float(pe_value)
+
+    # 保留視窗設6年（比5年統計窗多留1年緩衝）
+    cutoff = (
+        pd.Timestamp.now(tz=TZ).tz_localize(None)
+        - pd.DateOffset(years=6)
+    )
+    pe_hist = {
+        date_key: value
+        for date_key, value in pe_hist.items()
+        if pd.to_datetime(date_key) >= cutoff
+    }
+    history[key] = pe_hist
+
+    five_year_cutoff = (
+        pd.Timestamp.now(tz=TZ).tz_localize(None)
+        - pd.DateOffset(years=5)
+    )
+    recent_values = [
+        value
+        for date_key, value in pe_hist.items()
+        if pd.to_datetime(date_key) >= five_year_cutoff
+    ]
+
+    # 樣本數太少（例如剛開始累積）時，平均值/標準差不具參考性
+    if len(recent_values) < 30:
+        return None, None, len(recent_values)
+
+    array = np.array(recent_values)
+    return float(array.mean()), float(array.std()), len(recent_values)
+
+
+def fetch_market_overview(history):
     """
     大盤總覽：加權指數+漲跌幅、大盤本益比(簡單平均，非市值加權，僅供參考)、
     大盤波動率(TAIEX近20日年化歷史波動率)、大盤融資維持率。
@@ -692,7 +743,9 @@ def fetch_market_overview():
             try:
                 code = str(row.get('Code', '')).strip()
                 pe = float(str(row.get('PEratio', '')).replace(',', ''))
-                if pe > 0:
+                # 排除異常極端值（例如剛轉盈、獲利極低的公司本益比會飆到數百倍），
+                # 避免少數暴衝股票把加權平均值拉爆。100倍以上視為異常濾除。
+                if 0 < pe <= 100:
                     pe_by_code[code] = pe
             except (ValueError, TypeError):
                 continue
@@ -728,6 +781,12 @@ def fetch_market_overview():
                 print('[大盤本益比] 計算結果：', result['market_pe'])
     except Exception as error:
         print('大盤本益比抓取失敗：', repr(error))
+
+    pe_mean, pe_std, pe_sample = update_market_pe_history(history, result['market_pe'])
+    result['market_pe_mean'] = pe_mean
+    result['market_pe_std'] = pe_std
+    result['market_pe_sample'] = pe_sample
+    print(f'[大盤本益比] 近5年統計：平均={pe_mean}, 標準差={pe_std}, 樣本數={pe_sample}')
 
     # ---- 大盤融資維持率 ----
     try:
@@ -1408,8 +1467,8 @@ def main():
     grid = fig.add_gridspec(
         3,
         2,
-        height_ratios=[1.1, 4.6, 4.6],
-        hspace=0.10,
+        height_ratios=[1.25, 4.475, 4.475],
+        hspace=0.04,
         wspace=0.06,
         left=0.03,
         right=0.97,
@@ -1436,12 +1495,37 @@ def main():
         alpha=0.85
     )
 
-    market = fetch_market_overview()
+    history = load_history()
+
+    market = fetch_market_overview(history)
 
     def fmt(value, suffix='', digits=2):
         if value is None:
             return 'N/A'
         return f'{value:,.{digits}f}{suffix}'
+
+    def metric_state(kind, value, pe_mean=None, pe_std=None):
+        if kind == 'pe':
+            if pe_mean is None or pe_std is None or pe_std <= 0:
+                return 'yellow'  # 樣本數不足5年統計，無法判斷，先顯示中性黃燈
+            if value > pe_mean + pe_std:
+                return 'red'
+            if value < pe_mean - pe_std:
+                return 'green'
+            return 'yellow'
+        if kind == 'margin':
+            if value >= 160:
+                return 'green'
+            if value >= 130:
+                return 'yellow'
+            return 'red'
+        if kind == 'vol':
+            if value < 20:
+                return 'green'
+            if value <= 30:
+                return 'yellow'
+            return 'red'
+        return 'yellow'
 
     if market['taiex_change_pct'] is not None:
         taiex_line = (
@@ -1453,9 +1537,9 @@ def main():
 
     title_ax.text(
         0.03,
-        0.85,
+        0.95,
         taiex_line,
-        fontsize=24,
+        fontsize=30,
         fontweight='bold',
         ha='left',
         va='top',
@@ -1463,21 +1547,38 @@ def main():
         alpha=0.95
     )
 
-    title_ax.text(
-        0.03,
-        0.52,
-        (
-            f"大盤本益比 {fmt(market['market_pe'])}\n"
-            f"大盤融資維持率 {fmt(market['margin_ratio'], suffix='%')}\n"
-            f"大盤波動率 {fmt(market['market_vol'], suffix='%')}"
-        ),
-        fontsize=20,
-        ha='left',
-        va='top',
-        color=TEXT_DIM,
-        linespacing=1.4,
-        alpha=0.9
-    )
+    pe_sample = market.get('market_pe_sample') or 0
+    pe_note = '' if pe_sample >= 30 else f'（樣本{pe_sample}天，累積中）'
+
+    metric_rows = [
+        ('大盤本益比', market['market_pe'], '', 'pe', pe_note),
+        ('大盤融資維持率', market['margin_ratio'], '%', 'margin', ''),
+        ('大盤波動率', market['market_vol'], '%', 'vol', ''),
+    ]
+
+    row_ys = [0.63, 0.36, 0.09]
+
+    for (label, value, suffix, kind, note), y in zip(metric_rows, row_ys):
+        title_ax.text(
+            0.03,
+            y,
+            f"{label} {fmt(value, suffix=suffix)}{note}",
+            fontsize=24,
+            ha='left',
+            va='center',
+            color=TEXT_DIM,
+            alpha=0.95
+        )
+        if value is not None:
+            draw_signal_light(
+                fig, title_ax,
+                metric_state(
+                    kind, value,
+                    pe_mean=market.get('market_pe_mean'),
+                    pe_std=market.get('market_pe_std')
+                ),
+                x=0.34, y=y, r_px=13
+            )
 
     fund_axes = [
         fig.add_subplot(grid[1, 0]),
@@ -1488,8 +1589,6 @@ def main():
         fig.add_subplot(grid[2, 0]),
         fig.add_subplot(grid[2, 1])
     ]
-
-    history = load_history()
 
     for ax, fund in zip(fund_axes, FUNDS):
         try:
