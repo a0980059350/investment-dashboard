@@ -1004,8 +1004,7 @@ def multi_year_return_text(dates, values, years_list=(1, 3, 5)):
     """
     計算「N年前的今天」到「今天」的報酬率（N分別取 years_list），
     若N年前的今天不是交易日，自動改用前一個交易日的資料（跟 date_based_stats 邏輯一致）。
-    不顯示「1/3/5年」字樣，也不顯示精確數字，改用固定門檻(100/200/300%)分級標示：
-    超過對應門檻就顯示「>100%」「>200%」「>300%」，沒超過就照實際數字顯示。
+    顯示實際數字，不加「1/3/5年」字樣。
     """
     series = (
         pd.Series(list(values), index=pd.DatetimeIndex(dates))
@@ -1016,10 +1015,8 @@ def multi_year_return_text(dates, values, years_list=(1, 3, 5)):
     latest_date = series.index[-1]
     latest = float(series.iloc[-1])
 
-    thresholds = (100, 200, 300)
     labels = []
-
-    for years, threshold in zip(years_list, thresholds):
+    for years in years_list:
         target_date = latest_date - pd.DateOffset(years=years)
         base_slice = series[series.index <= target_date]
 
@@ -1029,11 +1026,7 @@ def multi_year_return_text(dates, values, years_list=(1, 3, 5)):
             base_value = float(series.iloc[0])
 
         return_pct = (latest / base_value - 1) * 100
-
-        if return_pct >= threshold:
-            labels.append(f'{threshold}%')
-        else:
-            labels.append(f'{return_pct:+.0f}%')
+        labels.append(f'{return_pct:+.0f}%')
 
     return f"報酬率 {'／'.join(labels)}"
 
