@@ -560,6 +560,39 @@ def date_based_stats(dates, values):
     return latest, high, drawdown, return_rate
 
 
+def multi_year_return_text(dates, values, years_list=(1, 3, 5)):
+    """
+    計算「N年前的今天」到「今天」的報酬率（N分別取 years_list），
+    若N年前的今天不是交易日，自動改用前一個交易日的資料（跟 date_based_stats 邏輯一致）。
+    回傳格式化好的字串，例如：'1／3／5年報酬率 100／300／500%'
+    """
+    series = (
+        pd.Series(list(values), index=pd.DatetimeIndex(dates))
+        .sort_index()
+    )
+    series = series[~series.index.duplicated(keep='last')].dropna()
+
+    latest_date = series.index[-1]
+    latest = float(series.iloc[-1])
+
+    returns = []
+    for years in years_list:
+        target_date = latest_date - pd.DateOffset(years=years)
+        base_slice = series[series.index <= target_date]
+
+        if not base_slice.empty:
+            base_value = float(base_slice.iloc[-1])
+        else:
+            base_value = float(series.iloc[0])
+
+        returns.append(latest / base_value - 1)
+
+    years_label = '／'.join(str(years) for years in years_list)
+    values_label = '／'.join(f'{r * 100:+.0f}' for r in returns)
+
+    return f'{years_label}年報酬率 {values_label}%'
+
+
 def latest_and_high(dates, values):
     """近一年（今天往前一年）的最新值與最高值，用於顯示一般（未還原）價格。"""
     series = (
@@ -717,6 +750,8 @@ def plot_fund(ax, name, data, high_1y, fig):
         data['Value']
     )
 
+    multi_return_line = multi_year_return_text(data['Date'], data['Value'])
+
     high = high_1y if high_1y is not None else local_high
     drawdown = latest / high - 1
     add_price = high * 0.8
@@ -773,7 +808,8 @@ def plot_fund(ax, name, data, high_1y, fig):
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
             f'加碼價 {add_price:.2f}\n'
-            f'回撤 {drawdown:.1%}'
+            f'回撤 {drawdown:.1%}\n'
+            f'{multi_return_line}'
         ),
         transform=ax.transAxes,
         ha='right',
@@ -920,6 +956,12 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         color=GOLD
     )
 
+    # 「1／3／5年報酬率」用還原日線收盤價算，N年前的今天→今天(遇非交易日自動用最後交易日)
+    multi_return_line = multi_year_return_text(
+        etf_bundle['daily_adj'].index,
+        etf_bundle['daily_adj'].values
+    )
+
     ax.text(
         0.97,
         0.06,
@@ -928,7 +970,8 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
             f'停損價 {stop:.2f}\n'
-            f'回撤 {drawdown:.1%}'
+            f'回撤 {drawdown:.1%}\n'
+            f'{multi_return_line}'
         ),
         transform=ax.transAxes,
         ha='right',
