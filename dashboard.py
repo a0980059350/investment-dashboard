@@ -26,10 +26,12 @@ HISTORY_FILE = 'history.json'
 FUNDS = [
     {
         'name': '安聯科技',
+        'display': '安聯',
         'url': 'https://www.moneydj.com/funddj/ya/yp010000.djhtm?a=ACDD04'
     },
     {
         'name': '統一科技',
+        'display': '統一',
         'url': 'https://www.moneydj.com/funddj/ya/yp010000.djhtm?a=ACPS38'
     }
 ]
@@ -38,11 +40,13 @@ FUNDS = [
 ETFS = [
     {
         'name': '00631L',
+        'display': '正2',
         'ticker': '00631L.TW',
         'ema': 32
     },
     {
         'name': '00830',
+        'display': '費半',
         'ticker': '00830.TW',
         'ema': 42
     }
@@ -438,6 +442,285 @@ def fetch_twse_realtime(ticker):
             repr(error)
         )
         return None, None
+
+
+def fetch_taiex_realtime():
+    """加權指數即時點位+昨收，跟個股同一組TWSE API，代碼固定用 t00。"""
+    url = (
+        'https://mis.twse.com.tw/stock/api/getStockInfo.jsp'
+        '?ex_ch=tse_t00.tw&json=1&delay=0'
+    )
+    try:
+        response = requests.get(
+            url,
+            headers={
+                'User-Agent': (
+                    'Mozilla/5.0 (Linux; Android 13) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/126.0 Mobile Safari/537.36'
+                ),
+                'Referer': 'https://mis.twse.com.tw/stock/index.jsp'
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = payload.get('msgArray') or []
+        if not rows:
+            return None, None
+
+        row = rows[0]
+        raw_price = row.get('z') or row.get('ip')
+        raw_prev_close = row.get('y')
+
+        if not raw_price or raw_price == '-':
+            return None, None
+        if not raw_prev_close or raw_prev_close == '-':
+            return None, None
+
+        return float(raw_price), float(raw_prev_close)
+
+    except Exception as error:
+        print('加權指數即時報價抓取失敗：', repr(error))
+        return None, None
+
+
+def fetch_market_margin_ratio():
+    """
+    大盤融資維持率 = Σ(個股融資今日餘額(股) × 收盤價) / 大盤融資金額今日餘額(元)
+    分母：MI_MARGN selectType=MS 的「融資金額(仟元)-今日餘額」（證交所直接公布，不用自己加總）
+    分子：MI_MARGN selectType=ALL 每檔個股融資餘額 × STOCK_DAY_ALL 每檔個股收盤價
+    這支API欄位名稱證交所偶爾會調整，抓不到時印出實際欄位方便除錯，不會讓整支程式當掉。
+    """
+    for back_days in range(6):
+        try:
+            query_date = (
+                datetime.now(TZ) - pd.Timedelta(days=back_days)
+            ).strftime('%Y%m%d')
+
+            # ---- 分母：大盤融資金額今日餘額（仟元） ----
+            ms_resp = requests.get(
+                'https://www.twse.com.tw/exchangeReport/MI_MARGN',
+                params={'response': 'json', 'date': query_date, 'selectType': 'MS'},
+                timeout=20
+            )
+            ms_resp.raise_for_status()
+            ms_payload = ms_resp.json()
+
+            credit_fields = ms_payload.get('creditFields') or []
+            credit_list = ms_payload.get('creditList') or []
+
+            if not credit_fields or not credit_list:
+                continue
+
+            balance_col = next(
+                (i for i, f in enumerate(credit_fields) if '今日餘額' in f),
+                None
+            )
+            amount_row = next(
+                (row for row in credit_list if '融資金額' in str(row[0])),
+                None
+            )
+
+            if balance_col is None or amount_row is None:
+                print('MI_MARGN(MS) 欄位對不上，實際欄位：', credit_fields, credit_list)
+                continue
+
+            total_margin_amount = float(
+                str(amount_row[balance_col]).replace(',', '')
+            ) * 1000  # 仟元 -> 元
+
+            if total_margin_amount <= 0:
+                continue
+
+            # ---- 分子：每檔個股融資餘額 × 收盤價 ----
+            all_resp = requests.get(
+                'https://www.twse.com.tw/exchangeReport/MI_MARGN',
+                params={'response': 'json', 'date': query_date, 'selectType': 'ALL'},
+                timeout=30
+            )
+            all_resp.raise_for_status()
+            all_payload = all_resp.json()
+
+            all_fields = all_payload.get('fields') or []
+            all_rows = all_payload.get('data') or []
+
+            if not all_fields or not all_rows:
+                print('MI_MARGN(ALL) 沒有資料，實際欄位：', all_fields)
+                continue
+
+            code_col = next(
+                (i for i, f in enumerate(all_fields) if '代號' in f),
+                None
+            )
+            margin_balance_col = next(
+                (i for i, f in enumerate(all_fields)
+                 if '融資' in f and '今日餘額' in f),
+                None
+            )
+
+            if code_col is None or margin_balance_col is None:
+                print('MI_MARGN(ALL) 欄位對不上，實際欄位：', all_fields)
+                continue
+
+            margin_shares = {}
+            for row in all_rows:
+                try:
+                    code = str(row[code_col]).strip()
+                    shares = float(str(row[margin_balance_col]).replace(',', '')) * 1000
+                    if shares > 0:
+                        margin_shares[code] = shares
+                except (ValueError, IndexError):
+                    continue
+
+            if not margin_shares:
+                continue
+
+            # ---- 當日全部個股收盤價 ----
+            price_resp = requests.get(
+                'https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL',
+                params={'response': 'json'},
+                timeout=30
+            )
+            price_resp.raise_for_status()
+            price_payload = price_resp.json()
+
+            price_fields = price_payload.get('fields') or []
+            price_rows = price_payload.get('data') or []
+
+            price_code_col = next(
+                (i for i, f in enumerate(price_fields) if '代號' in f),
+                None
+            )
+            price_close_col = next(
+                (i for i, f in enumerate(price_fields) if '收盤' in f),
+                None
+            )
+
+            if price_code_col is None or price_close_col is None:
+                print('STOCK_DAY_ALL 欄位對不上，實際欄位：', price_fields)
+                continue
+
+            close_prices = {}
+            for row in price_rows:
+                try:
+                    code = str(row[price_code_col]).strip()
+                    close = float(str(row[price_close_col]).replace(',', ''))
+                    close_prices[code] = close
+                except (ValueError, IndexError):
+                    continue
+
+            margin_value = sum(
+                shares * close_prices[code]
+                for code, shares in margin_shares.items()
+                if code in close_prices
+            )
+
+            if margin_value <= 0:
+                continue
+
+            return margin_value / total_margin_amount * 100
+
+        except Exception as error:
+            print(f'融資維持率抓取失敗({back_days}天前)：', repr(error))
+
+    return None
+
+
+def fetch_market_overview():
+    """
+    大盤總覽：加權指數+漲跌幅、大盤本益比(簡單平均，非市值加權，僅供參考)、
+    大盤波動率(TAIEX近20日年化歷史波動率)、大盤融資維持率。
+    任何一項抓不到都顯示 N/A，不會讓整支程式失敗。
+    """
+    result = {
+        'taiex_price': None,
+        'taiex_change_pct': None,
+        'market_pe': None,
+        'market_vol': None,
+        'margin_ratio': None
+    }
+
+    # ---- 加權指數 ----
+    try:
+        live_price, live_prev_close = fetch_taiex_realtime()
+        if live_price is None:
+            info = yf.Ticker('^TWII').fast_info
+            live_price = float(info['last_price'])
+            live_prev_close = float(info['previous_close'])
+
+        result['taiex_price'] = live_price
+        if live_prev_close:
+            result['taiex_change_pct'] = live_price / live_prev_close - 1
+    except Exception as error:
+        print('加權指數抓取失敗：', repr(error))
+
+    # ---- 大盤波動率（20日年化歷史波動率，log return）----
+    try:
+        twii_hist = yf.download(
+            '^TWII', period='3mo', interval='1d',
+            auto_adjust=True, progress=False,
+            threads=False, timeout=30
+        )
+        if isinstance(twii_hist.columns, pd.MultiIndex):
+            twii_hist.columns = twii_hist.columns.get_level_values(0)
+
+        twii_ret = np.log(
+            twii_hist['Close'] / twii_hist['Close'].shift(1)
+        ).dropna()
+
+        result['market_vol'] = float(
+            twii_ret.tail(20).std() * np.sqrt(252) * 100
+        )
+    except Exception as error:
+        print('大盤波動率計算失敗：', repr(error))
+
+    # ---- 大盤本益比（上市全體個股本益比簡單平均，僅供參考）----
+    for back_days in range(6):
+        try:
+            query_date = (
+                datetime.now(TZ) - pd.Timedelta(days=back_days)
+            ).strftime('%Y%m%d')
+
+            url = (
+                'https://www.twse.com.tw/exchangeReport/BWIBBU_ALL'
+                f'?response=json&date={query_date}'
+            )
+            response = requests.get(url, timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+
+            fields = payload.get('fields') or []
+            rows = payload.get('data') or []
+
+            if '本益比' not in fields or not rows:
+                continue
+
+            pe_index = fields.index('本益比')
+            pe_values = []
+
+            for row in rows:
+                try:
+                    pe = float(str(row[pe_index]).replace(',', ''))
+                    if pe > 0:
+                        pe_values.append(pe)
+                except (ValueError, IndexError):
+                    continue
+
+            if pe_values:
+                result['market_pe'] = sum(pe_values) / len(pe_values)
+                break
+
+        except Exception as error:
+            print(f'大盤本益比抓取失敗({back_days}天前)：', repr(error))
+
+    # ---- 大盤融資維持率 ----
+    try:
+        result['margin_ratio'] = fetch_market_margin_ratio()
+    except Exception as error:
+        print('大盤融資維持率整體流程失敗：', repr(error))
+
+    return result
 
 
 def fetch_etf(ticker):
@@ -883,14 +1166,7 @@ def plot_fund(ax, name, data, high_1y, fig):
         va='bottom',
         fontsize=24,
         color=TEXT,
-        linespacing=1.7,
-        bbox=dict(
-            boxstyle='round,pad=.5',
-            facecolor=BG,
-            edgecolor=GOLD_DIM,
-            linewidth=1,
-            alpha=0.8
-        )
+        linespacing=1.7
     )
 
     draw_signal_light(fig, ax, fund_state, label=fund_status)
@@ -1045,14 +1321,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         va='bottom',
         fontsize=24,
         color=TEXT,
-        linespacing=1.65,
-        bbox=dict(
-            boxstyle='round,pad=.5',
-            facecolor=BG,
-            edgecolor=GOLD_DIM,
-            linewidth=1,
-            alpha=0.8
-        )
+        linespacing=1.65
     )
 
     draw_signal_light(fig, ax, etf_state, label=status)
@@ -1116,7 +1385,7 @@ def main():
     grid = fig.add_gridspec(
         3,
         2,
-        height_ratios=[0.42, 4.79, 4.79],
+        height_ratios=[1.1, 4.6, 4.6],
         hspace=0.10,
         wspace=0.06,
         left=0.03,
@@ -1142,6 +1411,38 @@ def main():
         va='center',
         color=TEXT_DIM,
         alpha=0.85
+    )
+
+    market = fetch_market_overview()
+
+    def fmt(value, suffix='', digits=2):
+        if value is None:
+            return 'N/A'
+        return f'{value:,.{digits}f}{suffix}'
+
+    if market['taiex_change_pct'] is not None:
+        taiex_line = (
+            f"加權指數 {fmt(market['taiex_price'], digits=2)} "
+            f"({market['taiex_change_pct']*100:+.2f}%)"
+        )
+    else:
+        taiex_line = f"加權指數 {fmt(market['taiex_price'], digits=2)}"
+
+    title_ax.text(
+        0.03,
+        0.78,
+        (
+            f"{taiex_line}\n"
+            f"大盤本益比 {fmt(market['market_pe'])}\n"
+            f"大盤融資維持率 {fmt(market['margin_ratio'], suffix='%')}\n"
+            f"大盤波動率 {fmt(market['market_vol'], suffix='%')}"
+        ),
+        fontsize=15,
+        ha='left',
+        va='top',
+        color=TEXT_DIM,
+        linespacing=1.4,
+        alpha=0.9
     )
 
     fund_axes = [
@@ -1172,7 +1473,7 @@ def main():
 
             plot_fund(
                 ax,
-                fund['name'],
+                fund['display'],
                 chart_data,
                 high_1y,
                 fig
@@ -1192,7 +1493,7 @@ def main():
             ax.text(
                 0.04,
                 0.65,
-                fund['name'],
+                fund['display'],
                 fontsize=34,
                 fontweight='bold',
                 color=GOLD,
@@ -1219,7 +1520,7 @@ def main():
 
             plot_etf(
                 ax,
-                etf['name'],
+                etf['display'],
                 etf_data,
                 etf['ema'],
                 fig
@@ -1239,7 +1540,7 @@ def main():
             ax.text(
                 0.04,
                 0.65,
-                etf['name'],
+                etf['display'],
                 fontsize=34,
                 fontweight='bold',
                 color=GOLD,
@@ -1271,6 +1572,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
