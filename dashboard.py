@@ -488,20 +488,31 @@ def fetch_taiex_realtime():
 def fetch_market_margin_ratio():
     """
     大盤融資維持率 = Σ(個股融資今日餘額(股) × 收盤價) / 大盤融資金額今日餘額(元)
+
+    分母：www.twse.com.tw 舊版 MI_MARGN?selectType=MS（集中市場信用交易統計彙總，
+         'tables'結構包著'融資金額(仟元)'的今日餘額，支援date參數查歷史）。
+
+    分子：openapi.twse.com.tw/v1/exchangeReport/MI_MARGN——這才是真正「每檔個股」
+         的融資餘額（舊版selectType=ALL其實仍是集中市場加總，不是個股，踩了一次坑）。
+         OpenAPI版本不支援查歷史日期，永遠只回傳最新一個交易日。
     """
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Linux; Android 13) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/126.0 Mobile Safari/537.36'
+        )
+    }
+
+    total_margin_amount = None
+    matched_date = None
+
+    # ---- 分母：找最近一個有資料的交易日的大盤融資金額今日餘額 ----
     for back_days in range(6):
         try:
             query_date = (
                 datetime.now(TZ) - pd.Timedelta(days=back_days)
             ).strftime('%Y%m%d')
-
-            headers = {
-                'User-Agent': (
-                    'Mozilla/5.0 (Linux; Android 13) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/126.0 Mobile Safari/537.36'
-                )
-            }
 
             ms_resp = requests.get(
                 'https://www.twse.com.tw/exchangeReport/MI_MARGN',
@@ -512,11 +523,9 @@ def fetch_market_margin_ratio():
             ms_resp.raise_for_status()
             ms_payload = ms_resp.json()
 
-            print(f'[融資維持率] {query_date} MI_MARGN(MS) 回傳內容：', ms_payload)
-
             ms_tables = ms_payload.get('tables') or []
             if not ms_tables:
-                print(f'[融資維持率] {query_date} MS 沒有tables，可能非交易日或格式變了')
+                print(f'[融資維持率] {query_date} MS 沒有tables，可能非交易日')
                 continue
 
             credit_fields = ms_tables[0].get('fields') or []
@@ -532,133 +541,89 @@ def fetch_market_margin_ratio():
             )
 
             if balance_col is None or amount_row is None:
-                print('[融資維持率] MI_MARGN(MS) 欄位對不上，實際欄位：', credit_fields, credit_list)
+                print('[融資維持率] MI_MARGN(MS) 欄位對不上，實際欄位：', credit_fields)
                 continue
 
-            total_margin_amount = float(
-                str(amount_row[balance_col]).replace(',', '')
-            ) * 1000
+            amount = float(str(amount_row[balance_col]).replace(',', '')) * 1000
 
-            if total_margin_amount <= 0:
-                print(f'[融資維持率] {query_date} 分母為0，略過')
-                continue
-
-            all_resp = requests.get(
-                'https://www.twse.com.tw/exchangeReport/MI_MARGN',
-                params={'response': 'json', 'date': query_date, 'selectType': 'ALL'},
-                headers=headers,
-                timeout=30
-            )
-            all_resp.raise_for_status()
-            all_payload = all_resp.json()
-
-            all_tables = all_payload.get('tables') or []
-            if all_tables:
-                all_fields = all_tables[0].get('fields') or []
-                all_rows = all_tables[0].get('data') or []
-            else:
-                all_fields = all_payload.get('fields') or []
-                all_rows = all_payload.get('data') or []
-
-            print(f'[融資維持率] {query_date} MI_MARGN(ALL) fields：', all_fields)
-            print(f'[融資維持率] {query_date} MI_MARGN(ALL) 資料筆數：', len(all_rows))
-
-            if not all_fields or not all_rows:
-                print(f'[融資維持率] {query_date} ALL 沒有fields/data，完整回傳：', all_payload)
-                continue
-
-            code_col = next(
-                (i for i, f in enumerate(all_fields) if '代號' in f),
-                None
-            )
-            margin_balance_col = next(
-                (i for i, f in enumerate(all_fields)
-                 if '融資' in f and '今日餘額' in f),
-                None
-            )
-
-            if code_col is None or margin_balance_col is None:
-                print('[融資維持率] MI_MARGN(ALL) 欄位對不上，實際欄位：', all_fields)
-                continue
-
-            margin_shares = {}
-            for row in all_rows:
-                try:
-                    code = str(row[code_col]).strip()
-                    shares = float(str(row[margin_balance_col]).replace(',', '')) * 1000
-                    if shares > 0:
-                        margin_shares[code] = shares
-                except (ValueError, IndexError):
-                    continue
-
-            print(f'[融資維持率] {query_date} 有效融資個股數：', len(margin_shares))
-
-            if not margin_shares:
-                continue
-
-            price_resp = requests.get(
-                'https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL',
-                params={'response': 'json'},
-                headers=headers,
-                timeout=30
-            )
-            price_resp.raise_for_status()
-            price_payload = price_resp.json()
-
-            price_tables = price_payload.get('tables') or []
-            if price_tables:
-                price_fields = price_tables[0].get('fields') or []
-                price_rows = price_tables[0].get('data') or []
-            else:
-                price_fields = price_payload.get('fields') or []
-                price_rows = price_payload.get('data') or []
-
-            print('[融資維持率] STOCK_DAY_ALL fields：', price_fields)
-            print('[融資維持率] STOCK_DAY_ALL 資料筆數：', len(price_rows))
-
-            price_code_col = next(
-                (i for i, f in enumerate(price_fields) if '代號' in f),
-                None
-            )
-            price_close_col = next(
-                (i for i, f in enumerate(price_fields) if '收盤' in f),
-                None
-            )
-
-            if price_code_col is None or price_close_col is None:
-                print('[融資維持率] STOCK_DAY_ALL 欄位對不上，實際欄位：', price_fields)
-                continue
-
-            close_prices = {}
-            for row in price_rows:
-                try:
-                    code = str(row[price_code_col]).strip()
-                    close = float(str(row[price_close_col]).replace(',', ''))
-                    close_prices[code] = close
-                except (ValueError, IndexError):
-                    continue
-
-            margin_value = sum(
-                shares * close_prices[code]
-                for code, shares in margin_shares.items()
-                if code in close_prices
-            )
-
-            print(
-                f'[融資維持率] {query_date} '
-                f'margin_value={margin_value}, '
-                f'total_margin_amount={total_margin_amount}'
-            )
-
-            if margin_value <= 0:
-                continue
-
-            return margin_value / total_margin_amount * 100
+            if amount > 0:
+                total_margin_amount = amount
+                matched_date = query_date
+                print(f'[融資維持率] 分母取自 {query_date}，金額={amount}')
+                break
 
         except Exception as error:
-            print(f'[融資維持率] 抓取失敗({back_days}天前)：', repr(error))
+            print(f'[融資維持率] 分母抓取失敗({back_days}天前)：', repr(error))
 
-    return None
+    if total_margin_amount is None:
+        print('[融資維持率] 找不到有效分母，放棄')
+        return None
+
+    # ---- 分子：openapi 每檔個股融資今日餘額 × 收盤價 ----
+    try:
+        margin_resp = requests.get(
+            'https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN',
+            headers=headers,
+            timeout=30
+        )
+        margin_resp.raise_for_status()
+        margin_rows = margin_resp.json()
+
+        print('[融資維持率] openapi MI_MARGN 資料筆數：', len(margin_rows))
+        if margin_rows:
+            print('[融資維持率] openapi MI_MARGN 第一筆範例：', margin_rows[0])
+
+        margin_shares = {}
+        for row in margin_rows:
+            try:
+                code = str(row.get('股票代號', '')).strip()
+                shares = float(str(row.get('融資今日餘額', '')).replace(',', '')) * 1000
+                if shares > 0:
+                    margin_shares[code] = shares
+            except (ValueError, TypeError):
+                continue
+
+        print('[融資維持率] 有效融資個股數：', len(margin_shares))
+
+        if not margin_shares:
+            return None
+
+        price_resp = requests.get(
+            'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL',
+            headers=headers,
+            timeout=30
+        )
+        price_resp.raise_for_status()
+        price_rows = price_resp.json()
+
+        close_prices = {}
+        for row in price_rows:
+            try:
+                code = str(row.get('Code', '')).strip()
+                close = float(str(row.get('ClosingPrice', '')).replace(',', ''))
+                close_prices[code] = close
+            except (ValueError, TypeError):
+                continue
+
+        margin_value = sum(
+            shares * close_prices[code]
+            for code, shares in margin_shares.items()
+            if code in close_prices
+        )
+
+        print(
+            f'[融資維持率] margin_value={margin_value}, '
+            f'total_margin_amount={total_margin_amount}（分母日期 {matched_date}）'
+        )
+
+        if margin_value <= 0:
+            return None
+
+        return margin_value / total_margin_amount * 100
+
+    except Exception as error:
+        print('[融資維持率] 分子抓取失敗：', repr(error))
+        return None
 
 
 def fetch_market_overview():
@@ -710,92 +675,57 @@ def fetch_market_overview():
         print('大盤波動率計算失敗：', repr(error))
 
     # ---- 大盤本益比（用當日成交金額加權平均，比簡單平均更接近市值加權）----
-    # 注意：BWIBBU_ALL / STOCK_DAY_ALL 這類 _ALL 端點不支援 date 參數，
-    # 帶了 date 反而會回傳空內容導致 JSONDecodeError，永遠只抓最新一天即可。
+    # 改用 openapi.twse.com.tw 這組新版OpenAPI，回傳格式是乾淨的 list of dict，
+    # 不用再猜 fields/data 怎麼對應，也比舊版 www.twse.com.tw 穩定。
     try:
         pe_resp = requests.get(
-            'https://www.twse.com.tw/exchangeReport/BWIBBU_ALL',
-            params={'response': 'json'},
+            'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL',
             timeout=20
         )
         pe_resp.raise_for_status()
-        pe_payload = pe_resp.json()
+        pe_rows = pe_resp.json()
 
-        pe_tables = pe_payload.get('tables') or []
-        if pe_tables:
-            pe_fields = pe_tables[0].get('fields') or []
-            pe_rows = pe_tables[0].get('data') or []
-        else:
-            pe_fields = pe_payload.get('fields') or []
-            pe_rows = pe_payload.get('data') or []
+        print('[大盤本益比] openapi BWIBBU_ALL 資料筆數：', len(pe_rows))
 
-        print('[大盤本益比] BWIBBU_ALL fields：', pe_fields)
-        print('[大盤本益比] BWIBBU_ALL 資料筆數：', len(pe_rows))
+        pe_by_code = {}
+        for row in pe_rows:
+            try:
+                code = str(row.get('Code', '')).strip()
+                pe = float(str(row.get('PEratio', '')).replace(',', ''))
+                if pe > 0:
+                    pe_by_code[code] = pe
+            except (ValueError, TypeError):
+                continue
 
-        if '本益比' in pe_fields and pe_rows:
-            code_col = next(
-                (i for i, f in enumerate(pe_fields) if '代號' in f), None
+        if pe_by_code:
+            price_resp = requests.get(
+                'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL',
+                timeout=30
             )
-            pe_col = pe_fields.index('本益比')
+            price_resp.raise_for_status()
+            price_rows = price_resp.json()
 
-            if code_col is not None:
-                pe_by_code = {}
-                for row in pe_rows:
-                    try:
-                        code = str(row[code_col]).strip()
-                        pe = float(str(row[pe_col]).replace(',', ''))
-                        if pe > 0:
-                            pe_by_code[code] = pe
-                    except (ValueError, IndexError):
+            print('[大盤本益比] openapi STOCK_DAY_ALL 資料筆數：', len(price_rows))
+
+            total_weight = 0.0
+            weighted_sum = 0.0
+
+            for row in price_rows:
+                try:
+                    code = str(row.get('Code', '')).strip()
+                    if code not in pe_by_code:
                         continue
+                    trade_value = float(str(row.get('TradeValue', '')).replace(',', ''))
+                    if trade_value <= 0:
+                        continue
+                    weighted_sum += pe_by_code[code] * trade_value
+                    total_weight += trade_value
+                except (ValueError, TypeError):
+                    continue
 
-                if pe_by_code:
-                    price_resp = requests.get(
-                        'https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL',
-                        params={'response': 'json'},
-                        timeout=30
-                    )
-                    price_resp.raise_for_status()
-                    price_payload = price_resp.json()
-
-                    price_tables = price_payload.get('tables') or []
-                    if price_tables:
-                        price_fields = price_tables[0].get('fields') or []
-                        price_rows = price_tables[0].get('data') or []
-                    else:
-                        price_fields = price_payload.get('fields') or []
-                        price_rows = price_payload.get('data') or []
-
-                    print('[大盤本益比] STOCK_DAY_ALL fields：', price_fields)
-                    print('[大盤本益比] STOCK_DAY_ALL 資料筆數：', len(price_rows))
-
-                    price_code_col = next(
-                        (i for i, f in enumerate(price_fields) if '代號' in f), None
-                    )
-                    value_col = next(
-                        (i for i, f in enumerate(price_fields) if '成交金額' in f), None
-                    )
-
-                    if price_code_col is not None and value_col is not None:
-                        total_weight = 0.0
-                        weighted_sum = 0.0
-
-                        for row in price_rows:
-                            try:
-                                code = str(row[price_code_col]).strip()
-                                if code not in pe_by_code:
-                                    continue
-                                trade_value = float(str(row[value_col]).replace(',', ''))
-                                if trade_value <= 0:
-                                    continue
-                                weighted_sum += pe_by_code[code] * trade_value
-                                total_weight += trade_value
-                            except (ValueError, IndexError):
-                                continue
-
-                        if total_weight > 0:
-                            result['market_pe'] = weighted_sum / total_weight
-                            print('[大盤本益比] 計算結果：', result['market_pe'])
+            if total_weight > 0:
+                result['market_pe'] = weighted_sum / total_weight
+                print('[大盤本益比] 計算結果：', result['market_pe'])
     except Exception as error:
         print('大盤本益比抓取失敗：', repr(error))
 
