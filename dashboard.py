@@ -1500,20 +1500,6 @@ def main():
     title_ax.set_xlim(0, 1)
     title_ax.set_ylim(0, 1)
 
-    title_ax.text(
-        1,
-        0.78,
-        (
-            '更新時間：'
-            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
-        ),
-        fontsize=20,
-        ha='right',
-        va='center',
-        color=TEXT_DIM,
-        alpha=0.85
-    )
-
     history = load_history()
 
     market = fetch_market_overview(history)
@@ -1546,18 +1532,11 @@ def main():
             return 'red'
         return 'yellow'
 
-    if market['taiex_change_pct'] is not None:
-        taiex_line = (
-            f"加權指數 {fmt(market['taiex_price'], digits=2)} "
-            f"({market['taiex_change_pct']*100:+.2f}%)"
-        )
-    else:
-        taiex_line = f"加權指數 {fmt(market['taiex_price'], digits=2)}"
-
+    # ---- 左欄：加權指數 / 漲跌幅 / 更新時間 ----
     title_ax.text(
         0.03,
-        0.95,
-        taiex_line,
+        0.88,
+        f"加權 {fmt(market['taiex_price'], digits=2)}",
         fontsize=30,
         fontweight='bold',
         ha='left',
@@ -1566,13 +1545,45 @@ def main():
         alpha=0.95
     )
 
+    if market['taiex_change_pct'] is not None:
+        change_text = f"{market['taiex_change_pct']*100:+.2f}%"
+    else:
+        change_text = 'N/A'
+
+    title_ax.text(
+        0.03,
+        0.52,
+        f"漲跌幅 {change_text}",
+        fontsize=24,
+        ha='left',
+        va='center',
+        color=TEXT_DIM,
+        alpha=0.95
+    )
+
+    title_ax.text(
+        0.03,
+        0.18,
+        (
+            '日期：'
+            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
+        ),
+        fontsize=18,
+        ha='left',
+        va='center',
+        color=TEXT_DIM,
+        alpha=0.85
+    )
+
+    # ---- 右欄：大盤本益比 / 大盤波動率 / 大盤融資維持率 ----
     metric_rows = [
-        ('大盤本益比', market['market_pe'], '', 'pe', ''),
-        ('大盤波動率', market['market_vol'], '%', 'vol', ''),
-        ('大盤融資維持率', market['margin_ratio'], '%', 'margin', ''),
+        ('本益比', market['market_pe'], '', 'pe', ''),
+        ('波動率', market['market_vol'], '%', 'vol', ''),
+        ('維持率', market['margin_ratio'], '%', 'margin', ''),
     ]
 
-    row_ys = [0.63, 0.36, 0.09]
+    row_ys = [0.85, 0.52, 0.19]
+    right_x = 0.55
 
     for (label, value, suffix, kind, note), y in zip(metric_rows, row_ys):
         if value is not None:
@@ -1583,11 +1594,11 @@ def main():
                     pe_mean=market.get('market_pe_mean'),
                     pe_std=market.get('market_pe_std')
                 ),
-                x=0.03, y=y, r_px=13
+                x=right_x, y=y, r_px=13
             )
 
         title_ax.text(
-            0.06,
+            right_x + 0.03,
             y,
             f"{label} {fmt(value, suffix=suffix)}{note}",
             fontsize=24,
