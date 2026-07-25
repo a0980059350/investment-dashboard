@@ -386,6 +386,60 @@ def history_to_chart_data(fund_history):
     )
 
 
+def fetch_twse_realtime(ticker):
+    """
+    直接抓證交所(TWSE)公開的即時資訊API，跟券商APP同一組資料源。
+    回傳 (最新價, 昨收盤價)，抓不到或格式不對就回傳 (None, None)，
+    由呼叫端 fallback 回 yfinance 的做法。
+    """
+    symbol = ticker.replace('.TW', '').replace('.TWO', '')
+    ex_ch = f'tse_{symbol}.tw'
+
+    url = (
+        'https://mis.twse.com.tw/stock/api/getStockInfo.jsp'
+        f'?ex_ch={ex_ch}&json=1&delay=0'
+    )
+
+    try:
+        response = requests.get(
+            url,
+            headers={
+                'User-Agent': (
+                    'Mozilla/5.0 (Linux; Android 13) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/126.0 Mobile Safari/537.36'
+                ),
+                'Referer': 'https://mis.twse.com.tw/stock/index.jsp'
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        rows = payload.get('msgArray') or []
+        if not rows:
+            return None, None
+
+        row = rows[0]
+        raw_price = row.get('z')
+        raw_prev_close = row.get('y')
+
+        # 'z' 在非交易時間或尚無成交時會是 '-'，視為抓取失敗
+        if not raw_price or raw_price == '-':
+            return None, None
+        if not raw_prev_close or raw_prev_close == '-':
+            return None, None
+
+        return float(raw_price), float(raw_prev_close)
+
+    except Exception as error:
+        print(
+            f'{ticker} TWSE即時報價抓取失敗，改用yfinance：',
+            repr(error)
+        )
+        return None, None
+
+
 def fetch_etf(ticker):
     data = pd.DataFrame()
     raw_data = pd.DataFrame()
@@ -470,38 +524,36 @@ def fetch_etf(ticker):
     })
 
     # ---- 即時報價（跟 Yahoo 網頁上看到的一致，不受歷史K棒延遲影響） ----
-    # 歷史K棒 (yf.download) 有時會延遲一個交易日才補上最新資料，
-    # 「最新價」改用 fast_info 抓即時報價，避免顯示到還沒更新的舊資料。
-    # 「昨收」不用 fast_info 自己的 previous_close（實測發現這欄位不準確），
-    # 改用 daily_raw 歷史K棒的最後一筆——那才是真正確定收盤的前一交易日價格。
+    # 優先用證交所(TWSE)的即時資訊API直接抓「最新價/昨收」，
+    # 這是跟券商APP同一組資料源，不用透過yfinance轉手。
+    # 抓不到才 fallback 用 fast_info，再不行才退回歷史K棒最後一筆。
     # EMA、最高價、回撤、停損價這些仍然用歷史K棒 (daily_adj) 算，不受影響。
-    live_price = None
+    live_price, live_prev_close = fetch_twse_realtime(ticker)
 
-    try:
-        live_price = float(yf.Ticker(ticker).fast_info['last_price'])
-    except Exception as error:
-        print(
-            f'{ticker} 即時報價抓取失敗，改用歷史K棒最後一筆：',
-            repr(error)
-        )
+    if live_price is None:
+        try:
+            live_price = float(yf.Ticker(ticker).fast_info['last_price'])
+        except Exception as error:
+            print(
+                f'{ticker} 即時報價抓取失敗，改用歷史K棒最後一筆：',
+                repr(error)
+            )
 
     if live_price is None:
         # fallback：抓不到即時報價時，退回原本用歷史K棒最後一筆的做法
         live_price = float(daily_raw_close.iloc[-1])
 
-    # 「昨收」要抓「今天以前」最後一筆收盤價才對：
-    # 如果歷史K棒剛好還沒延遲（最後一筆已經是今天），要跳過今天這筆，
-    # 用再前一筆；如果歷史K棒延遲一天（最後一筆停在昨天），那一筆本身就是昨收。
-    today_date = datetime.now(TZ).date()
-    raw_index = daily_raw_close.index
-    if getattr(raw_index, 'tz', None) is not None:
-        raw_index_naive = raw_index.tz_convert(TZ).tz_localize(None)
-    else:
-        raw_index_naive = raw_index
-    prior_days = daily_raw_close[raw_index_naive.normalize() < pd.Timestamp(today_date)]
-    live_prev_close = float(
-        prior_days.iloc[-1] if not prior_days.empty else daily_raw_close.iloc[-1]
-    )
+    if live_prev_close is None:
+        # 「昨收」要抓「即時價那個交易日」的前一個交易日收盤價才對。
+        # 比對歷史K棒最後一筆收盤價，是否已經等於即時報價──
+        #   - 如果相等，代表歷史K棒已經追上即時價那個交易日，昨收要用「倒數第二筆」。
+        #   - 如果不相等，代表歷史K棒還沒追上（延遲），最後一筆本身就是正確的昨收。
+        if len(daily_raw_close) >= 2 and abs(
+            float(daily_raw_close.iloc[-1]) - live_price
+        ) < 1e-6:
+            live_prev_close = float(daily_raw_close.iloc[-2])
+        else:
+            live_prev_close = float(daily_raw_close.iloc[-1])
 
     return {
         'weekly': weekly_data.dropna().tail(53),
