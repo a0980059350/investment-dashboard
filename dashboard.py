@@ -595,8 +595,8 @@ def multi_year_return_text(dates, values, years_list=(1, 3, 5)):
 
         returns.append(latest / base_value - 1)
 
-    years_label = '/'.join(str(years) for years in years_list)
-    values_label = '/'.join(f'{r * 100:+.0f}' for r in returns)
+    years_label = ','.join(str(years) for years in years_list)
+    values_label = ','.join(f'{r * 100:+.0f}' for r in returns)
 
     return f'{years_label}年{values_label}%'
 
@@ -752,7 +752,6 @@ def quarterly_month_ticks(dates):
 
 
 def plot_fund(ax, name, data, high_1y, fig):
-    x = np.arange(len(data))
     latest, local_high, _, _ = date_based_stats(
         data['Date'],
         data['Value']
@@ -769,11 +768,19 @@ def plot_fund(ax, name, data, high_1y, fig):
     else:
         change_pct = 0.0
 
+    # 走勢圖只畫近一年（1/3/5年報酬率的計算仍然用上面的完整歷史 data，不受影響）
+    latest_date = data['Date'].max()
+    chart_data = (
+        data[data['Date'] >= latest_date - pd.DateOffset(years=1)]
+        .reset_index(drop=True)
+    )
+    x = np.arange(len(chart_data))
+
     style_card(ax)
 
     ax.plot(
         x,
-        data['Value'],
+        chart_data['Value'],
         lw=2.6,
         color=GOLD_BRIGHT,
         solid_capstyle='round',
@@ -839,7 +846,7 @@ def plot_fund(ax, name, data, high_1y, fig):
     ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
     ax.set_xlim(0, max(1, len(x) - 1))
 
-    tick_positions, tick_labels = quarterly_month_ticks(data['Date'])
+    tick_positions, tick_labels = quarterly_month_ticks(chart_data['Date'])
     ax.set_xticks(tick_positions)
     ax.set_xticklabels(tick_labels)
     ax.tick_params(
