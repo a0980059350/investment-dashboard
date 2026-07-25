@@ -698,40 +698,87 @@ def fetch_market_overview():
     except Exception as error:
         print('大盤波動率計算失敗：', repr(error))
 
-    # ---- 大盤本益比（上市全體個股本益比簡單平均，僅供參考）----
+    # ---- 大盤本益比（用當日成交金額加權平均，比簡單平均更接近市值加權）----
     for back_days in range(6):
         try:
             query_date = (
                 datetime.now(TZ) - pd.Timedelta(days=back_days)
             ).strftime('%Y%m%d')
 
-            url = (
-                'https://www.twse.com.tw/exchangeReport/BWIBBU_ALL'
-                f'?response=json&date={query_date}'
+            pe_resp = requests.get(
+                'https://www.twse.com.tw/exchangeReport/BWIBBU_ALL',
+                params={'response': 'json', 'date': query_date},
+                timeout=20
             )
-            response = requests.get(url, timeout=20)
-            response.raise_for_status()
-            payload = response.json()
+            pe_resp.raise_for_status()
+            pe_payload = pe_resp.json()
 
-            fields = payload.get('fields') or []
-            rows = payload.get('data') or []
+            pe_fields = pe_payload.get('fields') or []
+            pe_rows = pe_payload.get('data') or []
 
-            if '本益比' not in fields or not rows:
+            if '本益比' not in pe_fields or not pe_rows:
                 continue
 
-            pe_index = fields.index('本益比')
-            pe_values = []
+            code_col = next(
+                (i for i, f in enumerate(pe_fields) if '代號' in f), None
+            )
+            pe_col = pe_fields.index('本益比')
 
-            for row in rows:
+            if code_col is None:
+                continue
+
+            pe_by_code = {}
+            for row in pe_rows:
                 try:
-                    pe = float(str(row[pe_index]).replace(',', ''))
+                    code = str(row[code_col]).strip()
+                    pe = float(str(row[pe_col]).replace(',', ''))
                     if pe > 0:
-                        pe_values.append(pe)
+                        pe_by_code[code] = pe
                 except (ValueError, IndexError):
                     continue
 
-            if pe_values:
-                result['market_pe'] = sum(pe_values) / len(pe_values)
+            if not pe_by_code:
+                continue
+
+            price_resp = requests.get(
+                'https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL',
+                params={'response': 'json'},
+                timeout=30
+            )
+            price_resp.raise_for_status()
+            price_payload = price_resp.json()
+
+            price_fields = price_payload.get('fields') or []
+            price_rows = price_payload.get('data') or []
+
+            price_code_col = next(
+                (i for i, f in enumerate(price_fields) if '代號' in f), None
+            )
+            value_col = next(
+                (i for i, f in enumerate(price_fields) if '成交金額' in f), None
+            )
+
+            if price_code_col is None or value_col is None:
+                continue
+
+            total_weight = 0.0
+            weighted_sum = 0.0
+
+            for row in price_rows:
+                try:
+                    code = str(row[price_code_col]).strip()
+                    if code not in pe_by_code:
+                        continue
+                    trade_value = float(str(row[value_col]).replace(',', ''))
+                    if trade_value <= 0:
+                        continue
+                    weighted_sum += pe_by_code[code] * trade_value
+                    total_weight += trade_value
+                except (ValueError, IndexError):
+                    continue
+
+            if total_weight > 0:
+                result['market_pe'] = weighted_sum / total_weight
                 break
 
         except Exception as error:
@@ -1479,7 +1526,7 @@ def main():
             f"大盤融資維持率 {fmt(market['margin_ratio'], suffix='%')}\n"
             f"大盤波動率 {fmt(market['market_vol'], suffix='%')}"
         ),
-        fontsize=15,
+        fontsize=20,
         ha='left',
         va='top',
         color=TEXT_DIM,
