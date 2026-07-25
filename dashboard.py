@@ -817,14 +817,13 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         .mean()
     )
 
-    _, high = latest_and_high(
-        etf_bundle['daily_adj'].index,
-        etf_bundle['daily_adj'].values
-    )
+    # 「最高價」改用還原週線的盤中最高點 (週K棒的High)，不是收盤價 (Close)。
+    # data 本身已經是 fetch_etf() 裡取近一年 (tail 53週) 的還原週線，
+    # 所以這裡直接抓這段期間內週K棒的最高High，範圍跟原本一致，只是換了欄位。
+    high = float(data['High'].max())
 
     # 「最新價/漲跌幅」改用即時報價 (fast_info)，跟Yahoo網頁/券商顯示的一致，
     # 不受歷史K棒 (daily_adj) 有時延遲一個交易日才更新的影響。
-    # 「最高價」仍用歷史K棒的滾動高點，EMA/停損價計算邏輯不變。
     latest = etf_bundle['live_price']
     live_prev_close = etf_bundle['live_prev_close']
 
