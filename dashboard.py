@@ -463,15 +463,14 @@ def fetch_etf(ticker):
 
     # ---- 即時報價（跟 Yahoo 網頁上看到的一致，不受歷史K棒延遲影響） ----
     # 歷史K棒 (yf.download) 有時會延遲一個交易日才補上最新資料，
-    # 「最新價/漲跌幅」改用 fast_info 抓即時報價，避免顯示到還沒更新的舊資料。
+    # 「最新價」改用 fast_info 抓即時報價，避免顯示到還沒更新的舊資料。
+    # 「昨收」不用 fast_info 自己的 previous_close（實測發現這欄位不準確），
+    # 改用 daily_raw 歷史K棒的最後一筆——那才是真正確定收盤的前一交易日價格。
     # EMA、最高價、回撤、停損價這些仍然用歷史K棒 (daily_adj) 算，不受影響。
     live_price = None
-    live_prev_close = None
 
     try:
-        fast_info = yf.Ticker(ticker).fast_info
-        live_price = float(fast_info['last_price'])
-        live_prev_close = float(fast_info['previous_close'])
+        live_price = float(yf.Ticker(ticker).fast_info['last_price'])
     except Exception as error:
         print(
             f'{ticker} 即時報價抓取失敗，改用歷史K棒最後一筆：',
@@ -481,10 +480,20 @@ def fetch_etf(ticker):
     if live_price is None:
         # fallback：抓不到即時報價時，退回原本用歷史K棒最後一筆的做法
         live_price = float(daily_raw_close.iloc[-1])
-        live_prev_close = (
-            float(daily_raw_close.iloc[-2])
-            if len(daily_raw_close) >= 2 else live_price
-        )
+
+    # 「昨收」要抓「今天以前」最後一筆收盤價才對：
+    # 如果歷史K棒剛好還沒延遲（最後一筆已經是今天），要跳過今天這筆，
+    # 用再前一筆；如果歷史K棒延遲一天（最後一筆停在昨天），那一筆本身就是昨收。
+    today_date = datetime.now(TZ).date()
+    raw_index = daily_raw_close.index
+    if getattr(raw_index, 'tz', None) is not None:
+        raw_index_naive = raw_index.tz_convert(TZ).tz_localize(None)
+    else:
+        raw_index_naive = raw_index
+    prior_days = daily_raw_close[raw_index_naive.normalize() < pd.Timestamp(today_date)]
+    live_prev_close = float(
+        prior_days.iloc[-1] if not prior_days.empty else daily_raw_close.iloc[-1]
+    )
 
     return {
         'weekly': weekly_data.dropna().tail(53),
