@@ -387,11 +387,15 @@ def fetch_etf(ticker):
     raw_data = pd.DataFrame()
     last_error = None
 
+    # 期間拉長到6年（原本只抓18個月），
+    # 這樣「1/3/5年報酬率」裡的3年、5年才有真正的歷史資料可以算，
+    # 不會因為資料不夠長而退回用「現有資料最早一筆」頂替，導致報酬率失真。
+    # 週線圖表顯示範圍不受影響，仍然只取最近53週（weekly_data.tail(53)）。
     for attempt in range(3):
         try:
             data = yf.download(
                 ticker,
-                period='18mo',
+                period='6y',
                 interval='1d',
                 auto_adjust=True,
                 progress=False,
@@ -401,7 +405,7 @@ def fetch_etf(ticker):
 
             raw_data = yf.download(
                 ticker,
-                period='18mo',
+                period='6y',
                 interval='1d',
                 auto_adjust=False,
                 progress=False,
