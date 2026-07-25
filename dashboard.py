@@ -725,9 +725,7 @@ def fetch_market_overview(history):
     except Exception as error:
         print('大盤波動率計算失敗：', repr(error))
 
-    # ---- 大盤本益比（用當日成交金額加權平均，比簡單平均更接近市值加權）----
-    # 改用 openapi.twse.com.tw 這組新版OpenAPI，回傳格式是乾淨的 list of dict，
-    # 不用再猜 fields/data 怎麼對應，也比舊版 www.twse.com.tw 穩定。
+    # ---- 大盤本益比（改用市值加權：已發行股數 × 收盤價 當權重，接近官方算法）----
     try:
         pe_resp = requests.get(
             'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL',
@@ -760,25 +758,50 @@ def fetch_market_overview(history):
 
             print('[大盤本益比] openapi STOCK_DAY_ALL 資料筆數：', len(price_rows))
 
-            total_weight = 0.0
-            weighted_sum = 0.0
-
+            close_by_code = {}
             for row in price_rows:
                 try:
                     code = str(row.get('Code', '')).strip()
-                    if code not in pe_by_code:
+                    close = float(str(row.get('ClosingPrice', '')).replace(',', ''))
+                    if close > 0:
+                        close_by_code[code] = close
+                except (ValueError, TypeError):
+                    continue
+
+            shares_resp = requests.get(
+                'https://openapi.twse.com.tw/v1/opendata/t187ap03_L',
+                timeout=30
+            )
+            shares_resp.raise_for_status()
+            shares_rows = shares_resp.json()
+
+            print('[大盤本益比] openapi t187ap03_L(已發行股數) 資料筆數：', len(shares_rows))
+
+            total_weight = 0.0
+            weighted_sum = 0.0
+
+            for row in shares_rows:
+                try:
+                    code = str(row.get('公司代號', '')).strip()
+                    if code not in pe_by_code or code not in close_by_code:
                         continue
-                    trade_value = float(str(row.get('TradeValue', '')).replace(',', ''))
-                    if trade_value <= 0:
+
+                    shares = float(
+                        str(row.get('已發行普通股數或TDR原股發行股數', ''))
+                        .replace(',', '')
+                    )
+                    if shares <= 0:
                         continue
-                    weighted_sum += pe_by_code[code] * trade_value
-                    total_weight += trade_value
+
+                    market_cap = shares * close_by_code[code]
+                    weighted_sum += pe_by_code[code] * market_cap
+                    total_weight += market_cap
                 except (ValueError, TypeError):
                     continue
 
             if total_weight > 0:
                 result['market_pe'] = weighted_sum / total_weight
-                print('[大盤本益比] 計算結果：', result['market_pe'])
+                print('[大盤本益比] 市值加權計算結果：', result['market_pe'])
     except Exception as error:
         print('大盤本益比抓取失敗：', repr(error))
 
@@ -1556,16 +1579,6 @@ def main():
     row_ys = [0.63, 0.36, 0.09]
 
     for (label, value, suffix, kind, note), y in zip(metric_rows, row_ys):
-        title_ax.text(
-            0.03,
-            y,
-            f"{label} {fmt(value, suffix=suffix)}{note}",
-            fontsize=24,
-            ha='left',
-            va='center',
-            color=TEXT_DIM,
-            alpha=0.95
-        )
         if value is not None:
             draw_signal_light(
                 fig, title_ax,
@@ -1574,8 +1587,19 @@ def main():
                     pe_mean=market.get('market_pe_mean'),
                     pe_std=market.get('market_pe_std')
                 ),
-                x=0.34, y=y, r_px=13
+                x=0.03, y=y, r_px=13
             )
+
+        title_ax.text(
+            0.06,
+            y,
+            f"{label} {fmt(value, suffix=suffix)}{note}",
+            fontsize=24,
+            ha='left',
+            va='center',
+            color=TEXT_DIM,
+            alpha=0.95
+        )
 
     fund_axes = [
         fig.add_subplot(grid[1, 0]),
@@ -1702,7 +1726,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
 
