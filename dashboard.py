@@ -488,9 +488,6 @@ def fetch_taiex_realtime():
 def fetch_market_margin_ratio():
     """
     大盤融資維持率 = Σ(個股融資今日餘額(股) × 收盤價) / 大盤融資金額今日餘額(元)
-    分母：MI_MARGN selectType=MS 的「融資金額(仟元)-今日餘額」（證交所直接公布，不用自己加總）
-    分子：MI_MARGN selectType=ALL 每檔個股融資餘額 × STOCK_DAY_ALL 每檔個股收盤價
-    這支API欄位名稱證交所偶爾會調整，抓不到時印出實際欄位方便除錯，不會讓整支程式當掉。
     """
     for back_days in range(6):
         try:
@@ -498,19 +495,30 @@ def fetch_market_margin_ratio():
                 datetime.now(TZ) - pd.Timedelta(days=back_days)
             ).strftime('%Y%m%d')
 
-            # ---- 分母：大盤融資金額今日餘額（仟元） ----
+            headers = {
+                'User-Agent': (
+                    'Mozilla/5.0 (Linux; Android 13) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/126.0 Mobile Safari/537.36'
+                )
+            }
+
             ms_resp = requests.get(
                 'https://www.twse.com.tw/exchangeReport/MI_MARGN',
                 params={'response': 'json', 'date': query_date, 'selectType': 'MS'},
+                headers=headers,
                 timeout=20
             )
             ms_resp.raise_for_status()
             ms_payload = ms_resp.json()
 
+            print(f'[融資維持率] {query_date} MI_MARGN(MS) 回傳內容：', ms_payload)
+
             credit_fields = ms_payload.get('creditFields') or []
             credit_list = ms_payload.get('creditList') or []
 
             if not credit_fields or not credit_list:
+                print(f'[融資維持率] {query_date} MS 沒有creditFields/creditList，可能非交易日或格式變了')
                 continue
 
             balance_col = next(
@@ -523,20 +531,21 @@ def fetch_market_margin_ratio():
             )
 
             if balance_col is None or amount_row is None:
-                print('MI_MARGN(MS) 欄位對不上，實際欄位：', credit_fields, credit_list)
+                print('[融資維持率] MI_MARGN(MS) 欄位對不上，實際欄位：', credit_fields, credit_list)
                 continue
 
             total_margin_amount = float(
                 str(amount_row[balance_col]).replace(',', '')
-            ) * 1000  # 仟元 -> 元
+            ) * 1000
 
             if total_margin_amount <= 0:
+                print(f'[融資維持率] {query_date} 分母為0，略過')
                 continue
 
-            # ---- 分子：每檔個股融資餘額 × 收盤價 ----
             all_resp = requests.get(
                 'https://www.twse.com.tw/exchangeReport/MI_MARGN',
                 params={'response': 'json', 'date': query_date, 'selectType': 'ALL'},
+                headers=headers,
                 timeout=30
             )
             all_resp.raise_for_status()
@@ -545,8 +554,11 @@ def fetch_market_margin_ratio():
             all_fields = all_payload.get('fields') or []
             all_rows = all_payload.get('data') or []
 
+            print(f'[融資維持率] {query_date} MI_MARGN(ALL) fields：', all_fields)
+            print(f'[融資維持率] {query_date} MI_MARGN(ALL) 資料筆數：', len(all_rows))
+
             if not all_fields or not all_rows:
-                print('MI_MARGN(ALL) 沒有資料，實際欄位：', all_fields)
+                print(f'[融資維持率] {query_date} ALL 沒有fields/data，完整回傳：', all_payload)
                 continue
 
             code_col = next(
@@ -560,7 +572,7 @@ def fetch_market_margin_ratio():
             )
 
             if code_col is None or margin_balance_col is None:
-                print('MI_MARGN(ALL) 欄位對不上，實際欄位：', all_fields)
+                print('[融資維持率] MI_MARGN(ALL) 欄位對不上，實際欄位：', all_fields)
                 continue
 
             margin_shares = {}
@@ -573,13 +585,15 @@ def fetch_market_margin_ratio():
                 except (ValueError, IndexError):
                     continue
 
+            print(f'[融資維持率] {query_date} 有效融資個股數：', len(margin_shares))
+
             if not margin_shares:
                 continue
 
-            # ---- 當日全部個股收盤價 ----
             price_resp = requests.get(
                 'https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL',
                 params={'response': 'json'},
+                headers=headers,
                 timeout=30
             )
             price_resp.raise_for_status()
@@ -587,6 +601,9 @@ def fetch_market_margin_ratio():
 
             price_fields = price_payload.get('fields') or []
             price_rows = price_payload.get('data') or []
+
+            print('[融資維持率] STOCK_DAY_ALL fields：', price_fields)
+            print('[融資維持率] STOCK_DAY_ALL 資料筆數：', len(price_rows))
 
             price_code_col = next(
                 (i for i, f in enumerate(price_fields) if '代號' in f),
@@ -598,7 +615,7 @@ def fetch_market_margin_ratio():
             )
 
             if price_code_col is None or price_close_col is None:
-                print('STOCK_DAY_ALL 欄位對不上，實際欄位：', price_fields)
+                print('[融資維持率] STOCK_DAY_ALL 欄位對不上，實際欄位：', price_fields)
                 continue
 
             close_prices = {}
@@ -616,13 +633,19 @@ def fetch_market_margin_ratio():
                 if code in close_prices
             )
 
+            print(
+                f'[融資維持率] {query_date} '
+                f'margin_value={margin_value}, '
+                f'total_margin_amount={total_margin_amount}'
+            )
+
             if margin_value <= 0:
                 continue
 
             return margin_value / total_margin_amount * 100
 
         except Exception as error:
-            print(f'融資維持率抓取失敗({back_days}天前)：', repr(error))
+            print(f'[融資維持率] 抓取失敗({back_days}天前)：', repr(error))
 
     return None
 
@@ -1141,13 +1164,17 @@ def plot_fund(ax, name, data, high_1y, fig):
         fund_state = 'red'
         fund_status = '暫停加碼'
 
-    ax.set_title(
+    ax.text(
+        0.04,
+        0.93,
         name,
-        loc='left',
-        fontsize=34,
+        transform=ax.transAxes,
+        fontsize=30,
         fontweight='bold',
-        pad=14,
-        color=GOLD
+        color=GOLD,
+        ha='left',
+        va='top',
+        zorder=20
     )
 
     ax.text(
@@ -1290,13 +1317,17 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         etf_state = 'green'
         status = f'站上{ema_period}週線'
 
-    ax.set_title(
+    ax.text(
+        0.04,
+        0.93,
         name,
-        loc='left',
-        fontsize=34,
+        transform=ax.transAxes,
+        fontsize=30,
         fontweight='bold',
-        pad=14,
-        color=GOLD
+        color=GOLD,
+        ha='left',
+        va='top',
+        zorder=20
     )
 
     # 「1／3／5年報酬率」用還原日線收盤價算，N年前的今天→今天(遇非交易日自動用最後交易日)
@@ -1430,9 +1461,20 @@ def main():
 
     title_ax.text(
         0.03,
-        0.78,
+        0.85,
+        taiex_line,
+        fontsize=24,
+        fontweight='bold',
+        ha='left',
+        va='top',
+        color=GOLD,
+        alpha=0.95
+    )
+
+    title_ax.text(
+        0.03,
+        0.52,
         (
-            f"{taiex_line}\n"
             f"大盤本益比 {fmt(market['market_pe'])}\n"
             f"大盤融資維持率 {fmt(market['margin_ratio'], suffix='%')}\n"
             f"大盤波動率 {fmt(market['market_vol'], suffix='%')}"
