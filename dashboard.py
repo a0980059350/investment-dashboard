@@ -461,10 +461,37 @@ def fetch_etf(ticker):
         'Close': data['Close'].resample('W-FRI').last()
     })
 
+    # ---- 即時報價（跟 Yahoo 網頁上看到的一致，不受歷史K棒延遲影響） ----
+    # 歷史K棒 (yf.download) 有時會延遲一個交易日才補上最新資料，
+    # 「最新價/漲跌幅」改用 fast_info 抓即時報價，避免顯示到還沒更新的舊資料。
+    # EMA、最高價、回撤、停損價這些仍然用歷史K棒 (daily_adj) 算，不受影響。
+    live_price = None
+    live_prev_close = None
+
+    try:
+        fast_info = yf.Ticker(ticker).fast_info
+        live_price = float(fast_info['last_price'])
+        live_prev_close = float(fast_info['previous_close'])
+    except Exception as error:
+        print(
+            f'{ticker} 即時報價抓取失敗，改用歷史K棒最後一筆：',
+            repr(error)
+        )
+
+    if live_price is None:
+        # fallback：抓不到即時報價時，退回原本用歷史K棒最後一筆的做法
+        live_price = float(daily_raw_close.iloc[-1])
+        live_prev_close = (
+            float(daily_raw_close.iloc[-2])
+            if len(daily_raw_close) >= 2 else live_price
+        )
+
     return {
         'weekly': weekly_data.dropna().tail(53),
         'daily_adj': data['Close'],
-        'daily_raw': daily_raw_close
+        'daily_raw': daily_raw_close,
+        'live_price': live_price,
+        'live_prev_close': live_prev_close
     }
 
 
@@ -781,18 +808,23 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
         .mean()
     )
 
-    latest, high = latest_and_high(
+    _, high = latest_and_high(
         etf_bundle['daily_adj'].index,
         etf_bundle['daily_adj'].values
     )
+
+    # 「最新價/漲跌幅」改用即時報價 (fast_info)，跟Yahoo網頁/券商顯示的一致，
+    # 不受歷史K棒 (daily_adj) 有時延遲一個交易日才更新的影響。
+    # 「最高價」仍用歷史K棒的滾動高點，EMA/停損價計算邏輯不變。
+    latest = etf_bundle['live_price']
+    live_prev_close = etf_bundle['live_prev_close']
 
     drawdown = latest / high - 1
 
     stop = high * 0.8
 
-    daily_adj = etf_bundle['daily_adj'].dropna()
-    if len(daily_adj) >= 2:
-        change_pct = daily_adj.iloc[-1] / daily_adj.iloc[-2] - 1
+    if live_prev_close:
+        change_pct = latest / live_prev_close - 1
     else:
         change_pct = 0.0
 
@@ -1121,6 +1153,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
