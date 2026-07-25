@@ -590,7 +590,7 @@ def multi_year_return_text(dates, values, years_list=(1, 3, 5)):
     years_label = '／'.join(str(years) for years in years_list)
     values_label = '／'.join(f'{r * 100:+.0f}' for r in returns)
 
-    return f'{years_label}年報酬率 {values_label}%'
+    return f'{years_label}年 {values_label}%'
 
 
 def latest_and_high(dates, values):
