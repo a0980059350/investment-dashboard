@@ -677,6 +677,77 @@ def update_market_pe_history(history, pe_value):
     return float(array.mean()), float(array.std()), len(recent_values)
 
 
+def fetch_market_revenue_yoy():
+    """
+    上市公司整體當月營收年增率：Σ當月營收 / Σ去年當月營收 - 1
+    資料來源：openapi.twse.com.tw/v1/opendata/t187ap05_L（上市公司每月營收彙總表）。
+    這是月資料，每月中旬左右才會更新一次，不是每天都會變動，
+    平常時間看到的數字會是「最近一次公布的那個月」，不是即時的。
+    """
+    try:
+        resp = requests.get(
+            'https://openapi.twse.com.tw/v1/opendata/t187ap05_L',
+            timeout=30
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+
+        print('[上市公司YoY] t187ap05_L 資料筆數：', len(rows))
+        if rows:
+            print('[上市公司YoY] 第一筆範例：', rows[0])
+
+        if not rows:
+            return None, None
+
+        sample_keys = list(rows[0].keys())
+        this_key = next(
+            (k for k in sample_keys
+             if '當月營收' in k and '去年' not in k and '累計' not in k),
+            None
+        )
+        last_year_key = next(
+            (k for k in sample_keys
+             if '去年' in k and '當月' in k and '累計' not in k),
+            None
+        )
+        period_key = next(
+            (k for k in sample_keys if '年月' in k),
+            None
+        )
+
+        if this_key is None or last_year_key is None:
+            print('[上市公司YoY] 欄位對不上，實際欄位：', sample_keys)
+            return None, None
+
+        total_this = 0.0
+        total_last = 0.0
+        period = None
+
+        for row in rows:
+            try:
+                this_val = float(str(row.get(this_key, '')).replace(',', ''))
+                last_val = float(str(row.get(last_year_key, '')).replace(',', ''))
+                if this_val > 0 and last_val > 0:
+                    total_this += this_val
+                    total_last += last_val
+                    if period is None and period_key:
+                        period = row.get(period_key)
+            except (ValueError, TypeError):
+                continue
+
+        if total_last <= 0:
+            print('[上市公司YoY] 加總後分母為0，放棄')
+            return None, None
+
+        yoy = (total_this / total_last - 1) * 100
+        print(f'[上市公司YoY] 資料年月={period}，YoY={yoy}')
+        return yoy, period
+
+    except Exception as error:
+        print('[上市公司YoY] 抓取失敗：', repr(error))
+        return None, None
+
+
 def fetch_market_overview(history):
     """
     大盤總覽：加權指數+漲跌幅、大盤本益比(簡單平均，非市值加權，僅供參考)、
@@ -688,7 +759,9 @@ def fetch_market_overview(history):
         'taiex_change_pct': None,
         'market_pe': None,
         'market_vol': None,
-        'margin_ratio': None
+        'margin_ratio': None,
+        'revenue_yoy': None,
+        'revenue_period': None
     }
 
     # ---- 加權指數 ----
@@ -814,6 +887,14 @@ def fetch_market_overview(history):
         result['margin_ratio'] = fetch_market_margin_ratio()
     except Exception as error:
         print('大盤融資維持率整體流程失敗：', repr(error))
+
+    # ---- 上市公司當月營收年增率 ----
+    try:
+        yoy, period = fetch_market_revenue_yoy()
+        result['revenue_yoy'] = yoy
+        result['revenue_period'] = period
+    except Exception as error:
+        print('上市公司YoY整體流程失敗：', repr(error))
 
     return result
 
@@ -1486,7 +1567,7 @@ def main():
     grid = fig.add_gridspec(
         3,
         2,
-        height_ratios=[1.25, 4.475, 4.475],
+        height_ratios=[1.55, 4.35, 4.35],
         hspace=0.04,
         wspace=0.06,
         left=0.03,
@@ -1528,6 +1609,12 @@ def main():
             if value < 20:
                 return 'green'
             if value <= 30:
+                return 'yellow'
+            return 'red'
+        if kind == 'revenue_yoy':
+            if value > 20:
+                return 'green'
+            if value >= 0:
                 return 'yellow'
             return 'red'
         return 'yellow'
@@ -1575,15 +1662,20 @@ def main():
         alpha=0.85
     )
 
-    # ---- 右欄：大盤本益比 / 大盤波動率 / 大盤融資維持率 ----
+    # ---- 右欄：本益比 / 波動率 / 維持率 / 上市公司YoY ----
+    revenue_note = ''
+    if market.get('revenue_period'):
+        revenue_note = f"（{market['revenue_period']}）"
+
     metric_rows = [
         ('本益比', market['market_pe'], '', 'pe', ''),
         ('波動率', market['market_vol'], '%', 'vol', ''),
         ('維持率', market['margin_ratio'], '%', 'margin', ''),
+        ('YoY', market['revenue_yoy'], '%', 'revenue_yoy', revenue_note),
     ]
 
-    row_ys = [0.85, 0.52, 0.19]
-    right_x = 0.55
+    row_ys = [0.88, 0.63, 0.38, 0.13]
+    right_x = 0.66
 
     for (label, value, suffix, kind, note), y in zip(metric_rows, row_ys):
         if value is not None:
