@@ -1664,8 +1664,16 @@ def main():
 
     # ---- 右欄：本益比 / 波動率 / 維持率 / 上市公司YoY ----
     revenue_note = ''
-    if market.get('revenue_period'):
-        revenue_note = f"（{market['revenue_period']}）"
+    raw_period = market.get('revenue_period')
+    if raw_period:
+        try:
+            period_str = str(raw_period).strip()
+            roc_year = int(period_str[:-2])
+            month = int(period_str[-2:])
+            western_year_2digit = (roc_year + 1911) % 100
+            revenue_note = f"（{western_year_2digit:02d}／{month:02d}）"
+        except (ValueError, IndexError):
+            revenue_note = f"（{raw_period}）"
 
     metric_rows = [
         ('本益比', market['market_pe'], '', 'pe', ''),
