@@ -333,9 +333,13 @@ def update_history_and_get_high(history, fund_name, data):
         date_key = row['Date'].strftime('%Y-%m-%d')
         fund_history[date_key] = float(row['Value'])
 
+    # 保留視窗從400天拉長到6年，跟ETF那邊 period='6y' 的邏輯一致。
+    # 原本400天的cutoff會把超過1年多以前的淨值資料整批刪掉，
+    # 導致「3年/5年報酬率」永遠找不到夠久以前的基準值，
+    # 只能退回用「現有資料最早一筆」頂替，算出來的3年、5年數字會一樣、也不準。
     cutoff = (
         pd.Timestamp.now(tz=TZ).tz_localize(None)
-        - pd.Timedelta(days=400)
+        - pd.DateOffset(years=6)
     )
 
     fund_history = {
@@ -591,10 +595,10 @@ def multi_year_return_text(dates, values, years_list=(1, 3, 5)):
 
         returns.append(latest / base_value - 1)
 
-    years_label = '／'.join(str(years) for years in years_list)
-    values_label = '／'.join(f'{r * 100:+.0f}' for r in returns)
+    years_label = '/'.join(str(years) for years in years_list)
+    values_label = '/'.join(f'{r * 100:+.0f}' for r in returns)
 
-    return f'{years_label}年 {values_label}%'
+    return f'{years_label}年{values_label}%'
 
 
 def latest_and_high(dates, values):
