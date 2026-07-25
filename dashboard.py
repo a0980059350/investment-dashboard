@@ -1547,11 +1547,8 @@ def main():
         alpha=0.95
     )
 
-    pe_sample = market.get('market_pe_sample') or 0
-    pe_note = '' if pe_sample >= 30 else f'（樣本{pe_sample}天，累積中）'
-
     metric_rows = [
-        ('大盤本益比', market['market_pe'], '', 'pe', pe_note),
+        ('大盤本益比', market['market_pe'], '', 'pe', ''),
         ('大盤融資維持率', market['margin_ratio'], '%', 'margin', ''),
         ('大盤波動率', market['market_vol'], '%', 'vol', ''),
     ]
