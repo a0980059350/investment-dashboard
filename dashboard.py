@@ -544,13 +544,19 @@ def fetch_foreign_net_sell():
                 print(f'[外資賣超] {query_date} 找不到買賣差額欄位，實際欄位如上')
                 continue
 
+            # 精確鎖定「外資及陸資」這一列，排除「外資自營商」(這是自營商的一種，
+            # 不算在「外資」買賣超裡)。原本用寬鬆的'外資' in ...會兩種都match到，
+            # 只是靠資料剛好「外資及陸資」排在前面、next()抓第一個才矇對，不夠穩健。
             foreign_row = next(
-                (row for row in data_rows if '外資' in str(row[0])),
+                (
+                    row for row in data_rows
+                    if '外資及陸資' in str(row[0]) and '自營商' not in str(row[0])
+                ),
                 None
             )
 
             if foreign_row is None:
-                print(f'[外資賣超] {query_date} 找不到外資那一列，實際資料：', data_rows)
+                print(f'[外資賣超] {query_date} 找不到外資及陸資那一列，實際資料：', data_rows)
                 continue
 
             net_value = float(str(foreign_row[diff_col]).replace(',', ''))
