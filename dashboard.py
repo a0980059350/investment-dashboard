@@ -601,9 +601,19 @@ def fetch_market_margin_ratio():
         numerator_date = None
         if price_rows:
             numerator_date = price_rows[0].get('Date')
+
+        def to_western_yyyymmdd(date_value):
+            """把民國年(如1150724，7碼)或西元年(如20260724，8碼)統一轉成西元8碼字串比較"""
+            digits = str(date_value).strip()
+            if len(digits) == 7:
+                roc_year = int(digits[:3])
+                return f'{roc_year + 1911}{digits[3:]}'
+            return digits
+
         print(f'[融資維持率] 分子日期(STOCK_DAY_ALL) = {numerator_date}，分母日期(MS) = {matched_date}')
-        if numerator_date and matched_date and str(numerator_date) != str(matched_date):
-            print('[融資維持率] 警告：分子與分母不是同一天，計算結果可能有落差')
+        if numerator_date and matched_date:
+            if to_western_yyyymmdd(numerator_date) != to_western_yyyymmdd(matched_date):
+                print('[融資維持率] 警告：分子與分母不是同一天，計算結果可能有落差')
 
         close_prices = {}
         for row in price_rows:
@@ -730,15 +740,26 @@ def fetch_ndc_business_indicators():
                     with zf.open(name) as f:
                         lower_name = name.lower()
                         if lower_name.endswith('.csv'):
-                            target_df = pd.read_csv(f, encoding='utf-8-sig')
+                            candidate_df = pd.read_csv(f, encoding='utf-8-sig')
                         elif lower_name.endswith(('.xls', '.xlsx')):
-                            target_df = pd.read_excel(f)
+                            candidate_df = pd.read_excel(f)
                         elif lower_name.endswith('.ods'):
-                            target_df = pd.read_excel(f, engine='odf')
+                            candidate_df = pd.read_excel(f, engine='odf')
                         else:
                             continue
-                    if target_df is not None and len(target_df) > 0:
+
+                    if candidate_df is None or candidate_df.empty:
+                        continue
+
+                    cols = [str(c) for c in candidate_df.columns]
+                    print(f'[國發會景氣指標] {name} 欄位預覽：', cols[:8])
+
+                    # zip裡有manifest.csv這類「說明檔案結構」的清單，不是實際資料，
+                    # 要確認真的含有我們要的欄位才採用，不能抓到第一個能讀的csv就用。
+                    if any('景氣對策信號' in c or '海關出口值' in c for c in cols):
+                        target_df = candidate_df
                         break
+
                 except Exception as inner_error:
                     print(f'[國發會景氣指標] 讀取{name}失敗：', repr(inner_error))
                     continue
@@ -746,7 +767,7 @@ def fetch_ndc_business_indicators():
             target_df = pd.read_csv(io.BytesIO(content), encoding='utf-8-sig')
 
         if target_df is None or target_df.empty:
-            print('[國發會景氣指標] 解壓/讀取後找不到資料')
+            print('[國發會景氣指標] 解壓/讀取後找不到含目標欄位的資料檔')
             return result
 
         print('[國發會景氣指標] 欄位：', list(target_df.columns))
