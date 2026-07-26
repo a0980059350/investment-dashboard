@@ -1300,10 +1300,14 @@ def fetch_market_overview(history):
             shares_rows = shares_resp.json()
 
             print('[大盤估值指標] openapi t187ap03_L(已發行股數) 資料筆數：', len(shares_rows))
+            print('[大盤估值指標] pe_by_code 樣本數：', len(pe_by_code))
+            print('[大盤估值指標] pb_by_code 樣本數：', len(pb_by_code))
+            print('[大盤估值指標] close_by_code 樣本數：', len(close_by_code))
 
             pe_total_market_cap = pe_total_earnings = 0.0
             pb_total_market_cap = pb_total_book_value = 0.0
             yield_weighted_sum = yield_weight = 0.0
+            matched = 0
 
             for row in shares_rows:
                 try:
@@ -1311,13 +1315,17 @@ def fetch_market_overview(history):
                     if code not in close_by_code:
                         continue
 
+                    # 這支API的已發行股數單位是「仟股」，要乘1000才是實際股數。
+                    # 這個單位誤差在市值加權「比率」算法裡分子分母會同倍縮放而互相抵消，
+                    # 不影響最終PE/PB結果，但市值本身的絕對值要修正才正確。
                     shares = float(
                         str(row.get('已發行普通股數或TDR原股發行股數', ''))
                         .replace(',', '')
-                    )
+                    ) * 1000
                     if shares <= 0:
                         continue
 
+                    matched += 1
                     market_cap = shares * close_by_code[code]
 
                     if code in pe_by_code:
@@ -1338,6 +1346,10 @@ def fetch_market_overview(history):
                         yield_weight += market_cap
                 except (ValueError, TypeError, ZeroDivisionError):
                     continue
+
+            print('[大盤估值指標] shares與收盤價配對成功家數：', matched)
+            print('[大盤估值指標] pe_total_market_cap：', pe_total_market_cap, ' pe_total_earnings：', pe_total_earnings)
+            print('[大盤估值指標] pb_total_market_cap：', pb_total_market_cap, ' pb_total_book_value：', pb_total_book_value)
 
             if pe_total_earnings > 0:
                 result['market_pe'] = pe_total_market_cap / pe_total_earnings
