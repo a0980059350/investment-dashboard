@@ -714,6 +714,78 @@ def _normalize_period(value):
     return None
 
 
+def fetch_market_revenue_yoy():
+    """
+    上市公司整體當月營收年增率：Σ當月營收 / Σ去年當月營收 - 1
+    資料來源：openapi.twse.com.tw/v1/opendata/t187ap05_L（上市公司每月營收彙總表）。
+    這是月資料，每月中旬左右才會更新一次，不是每天都會變動，
+    平常時間看到的數字會是「最近一次公布的那個月」，不是即時的。
+    這支資料源單一、乾淨，不需要跨檔案合併，資料新鮮度也比國發會那份zip穩定。
+    """
+    try:
+        resp = requests.get(
+            'https://openapi.twse.com.tw/v1/opendata/t187ap05_L',
+            timeout=30
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+
+        print('[上市公司YoY] t187ap05_L 資料筆數：', len(rows))
+        if rows:
+            print('[上市公司YoY] 第一筆範例：', rows[0])
+
+        if not rows:
+            return None, None
+
+        sample_keys = list(rows[0].keys())
+        this_key = next(
+            (k for k in sample_keys
+             if '當月營收' in k and '去年' not in k and '累計' not in k),
+            None
+        )
+        last_year_key = next(
+            (k for k in sample_keys
+             if '去年' in k and '當月' in k and '累計' not in k),
+            None
+        )
+        period_key = next(
+            (k for k in sample_keys if '年月' in k),
+            None
+        )
+
+        if this_key is None or last_year_key is None:
+            print('[上市公司YoY] 欄位對不上，實際欄位：', sample_keys)
+            return None, None
+
+        total_this = 0.0
+        total_last = 0.0
+        period = None
+
+        for row in rows:
+            try:
+                this_val = float(str(row.get(this_key, '')).replace(',', ''))
+                last_val = float(str(row.get(last_year_key, '')).replace(',', ''))
+                if this_val > 0 and last_val > 0:
+                    total_this += this_val
+                    total_last += last_val
+                    if period is None and period_key:
+                        period = row.get(period_key)
+            except (ValueError, TypeError):
+                continue
+
+        if total_last <= 0:
+            print('[上市公司YoY] 加總後分母為0，放棄')
+            return None, None
+
+        yoy = (total_this / total_last - 1) * 100
+        print(f'[上市公司YoY] 資料年月={period}，YoY={yoy}')
+        return yoy, period
+
+    except Exception as error:
+        print('[上市公司YoY] 抓取失敗：', repr(error))
+        return None, None
+
+
 def fetch_ndc_business_indicators():
     """
     國發會《景氣指標及燈號》資料集(data.gov.tw dataset id 6099)是一份逐月時間序列，
@@ -913,11 +985,8 @@ def fetch_market_overview(history):
         'market_pe': None,
         'market_vol': None,
         'margin_ratio': None,
-        'business_cycle_signal': None,
-        'business_cycle_score': None,
-        'business_cycle_period': None,
-        'export_yoy': None,
-        'order_yoy': None
+        'revenue_yoy': None,
+        'revenue_period': None
     }
 
     # ---- 加權指數 ----
@@ -1044,16 +1113,13 @@ def fetch_market_overview(history):
     except Exception as error:
         print('大盤融資維持率整體流程失敗：', repr(error))
 
-    # ---- 國發會景氣指標：景氣燈號 / 出口YoY / 外銷訂單YoY(同一份資料一次抓) ----
+    # ---- 上市公司當月營收年增率 ----
     try:
-        ndc = fetch_ndc_business_indicators()
-        result['business_cycle_signal'] = ndc.get('business_cycle_signal')
-        result['business_cycle_score'] = ndc.get('business_cycle_score')
-        result['business_cycle_period'] = ndc.get('business_cycle_period')
-        result['export_yoy'] = ndc.get('export_yoy')
-        result['order_yoy'] = ndc.get('order_yoy')
+        yoy, period = fetch_market_revenue_yoy()
+        result['revenue_yoy'] = yoy
+        result['revenue_period'] = period
     except Exception as error:
-        print('國發會景氣指標整體流程失敗：', repr(error))
+        print('上市公司YoY整體流程失敗：', repr(error))
 
     return result
 
@@ -1726,7 +1792,7 @@ def main():
     grid = fig.add_gridspec(
         3,
         2,
-        height_ratios=[2.1, 4.1, 4.1],
+        height_ratios=[1.55, 4.35, 4.35],
         hspace=0.04,
         wspace=0.06,
         left=0.03,
@@ -1770,7 +1836,7 @@ def main():
             if value >= 25:
                 return 'yellow'
             return 'green'
-        if kind == 'trade_yoy':
+        if kind == 'revenue_yoy':
             if value < 0:
                 return 'red'
             if value <= 20:
@@ -1778,45 +1844,34 @@ def main():
             return 'green'
         return 'yellow'
 
-    def business_cycle_state(signal_text):
-        if signal_text in ('紅燈', '藍燈'):
-            return 'red'
-        if signal_text in ('黃紅燈', '黃藍燈'):
-            return 'yellow'
-        if signal_text == '綠燈':
-            return 'green'
-        return 'yellow'
-
-    bc_note = ''
-    raw_bc_period = market.get('business_cycle_period')
-    if raw_bc_period:
+    revenue_note = ''
+    raw_period = market.get('revenue_period')
+    if raw_period:
         try:
-            period_str = str(raw_bc_period).strip()
+            period_str = str(raw_period).strip()
             digits = re.sub(r'\D', '', period_str)
             if len(digits) == 6:
-                # 6碼：YYYYMM(西元)
                 year_4digit = int(digits[:4])
                 month = int(digits[4:6])
                 western_year_2digit = year_4digit % 100
             elif len(digits) == 5:
-                # 5碼：民國年(3碼)+月(2碼)，例如 11506 -> 115年06月
                 roc_year = int(digits[:3])
                 month = int(digits[3:5])
                 western_year_2digit = (roc_year + 1911) % 100
             else:
                 raise ValueError('無法辨識的日期格式')
-            bc_note = f"（{western_year_2digit:02d}／{month:02d}）"
+            revenue_note = f"（{western_year_2digit:02d}／{month:02d}）"
         except (ValueError, IndexError):
-            bc_note = f"（{raw_bc_period}）"
+            revenue_note = f"（{raw_period}）"
 
-    # ---- 左欄：加權 / 漲跌幅 / 本益比 / 波動率 / 維持率 ----
+    # ---- 左欄：加權 / 漲跌幅 / 日期 ----
     left_x = 0.03
 
     title_ax.text(
         left_x,
-        0.92,
+        0.88,
         f"加權 {fmt(market['taiex_price'], digits=2)}",
-        fontsize=28,
+        fontsize=30,
         fontweight='bold',
         ha='left',
         va='top',
@@ -1831,23 +1886,42 @@ def main():
 
     title_ax.text(
         left_x,
-        0.68,
+        0.52,
         f"漲跌幅 {change_text}",
-        fontsize=20,
+        fontsize=24,
         ha='left',
         va='center',
         color=TEXT_DIM,
         alpha=0.95
     )
 
-    left_metric_rows = [
+    title_ax.text(
+        left_x,
+        0.18,
+        (
+            '日期：'
+            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
+        ),
+        fontsize=18,
+        ha='left',
+        va='center',
+        color=TEXT_DIM,
+        alpha=0.85
+    )
+
+    # ---- 右欄：本益比 / 波動率 / 維持率 / YoY ----
+    right_x = 0.66
+
+    metric_rows = [
         ('本益比', market['market_pe'], '', 'pe', ''),
         ('波動率', market['market_vol'], '%', 'vol', ''),
         ('維持率', market['margin_ratio'], '%', 'margin', ''),
+        ('YoY', market['revenue_yoy'], '%', 'revenue_yoy', revenue_note),
     ]
-    left_row_ys = [0.46, 0.26, 0.06]
 
-    for (label, value, suffix, kind, note), y in zip(left_metric_rows, left_row_ys):
+    row_ys = [0.90, 0.68, 0.46, 0.24]
+
+    for (label, value, suffix, kind, note), y in zip(metric_rows, row_ys):
         if value is not None:
             draw_signal_light(
                 fig, title_ax,
@@ -1856,81 +1930,19 @@ def main():
                     pe_mean=market.get('market_pe_mean'),
                     pe_std=market.get('market_pe_std')
                 ),
-                x=left_x, y=y, r_px=12
-            )
-
-        title_ax.text(
-            left_x + 0.03,
-            y,
-            f"{label} {fmt(value, suffix=suffix)}{note}",
-            fontsize=20,
-            ha='left',
-            va='center',
-            color=TEXT_DIM,
-            alpha=0.95
-        )
-
-    # ---- 右欄：日期 / 訂單YoY / 出口YoY / 景氣燈號 ----
-    right_x = 0.66
-
-    title_ax.text(
-        right_x,
-        0.92,
-        (
-            '日期：'
-            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
-        ),
-        fontsize=18,
-        ha='left',
-        va='top',
-        color=TEXT_DIM,
-        alpha=0.85
-    )
-
-    right_metric_rows = [
-        ('訂單YoY', market['order_yoy'], '%', 'trade_yoy', bc_note),
-        ('出口YoY', market['export_yoy'], '%', 'trade_yoy', bc_note),
-    ]
-    right_row_ys = [0.62, 0.42]
-
-    for (label, value, suffix, kind, note), y in zip(right_metric_rows, right_row_ys):
-        if value is not None:
-            draw_signal_light(
-                fig, title_ax,
-                metric_state(kind, value),
-                x=right_x, y=y, r_px=12
+                x=right_x, y=y, r_px=13
             )
 
         title_ax.text(
             right_x + 0.03,
             y,
             f"{label} {fmt(value, suffix=suffix)}{note}",
-            fontsize=20,
+            fontsize=24,
             ha='left',
             va='center',
             color=TEXT_DIM,
             alpha=0.95
         )
-
-    # 景氣燈號：文字型結果，不是數字，跟其他幾項分開處理
-    bc_signal = market.get('business_cycle_signal')
-    if bc_signal is not None:
-        draw_signal_light(
-            fig, title_ax,
-            business_cycle_state(bc_signal),
-            x=right_x, y=0.22, r_px=12
-        )
-
-    title_ax.text(
-        right_x + 0.03,
-        0.22,
-        f"景氣燈號 {bc_signal or 'N/A'}{bc_note}",
-        fontsize=20,
-        ha='left',
-        va='center',
-        color=TEXT_DIM,
-        alpha=0.95
-    )
 
     fund_axes = [
         fig.add_subplot(grid[1, 0]),
@@ -2057,7 +2069,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
 
