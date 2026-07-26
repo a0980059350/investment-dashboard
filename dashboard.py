@@ -487,6 +487,199 @@ def fetch_taiex_realtime():
         return None, None
 
 
+def fetch_foreign_net_sell():
+    """
+    外資（不含投信、自營商）當日買賣超金額(元)。
+    資料來源：www.twse.com.tw/fund/BFI82U（三大法人買賣金額統計表），
+    這支報表裡有分開列出外資、投信、自營商各自的買賣差額，
+    只取「外資」那一列，不是三大法人合計。
+    格式跟MI_MARGN舊版一樣可能包在'tables'裡，也支援date參數查歷史。
+    這支URL/欄位名稱沒辦法連線驗證，抓不到會印出實際回傳內容方便校正。
+    """
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Linux; Android 13) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/126.0 Mobile Safari/537.36'
+        )
+    }
+
+    for back_days in range(6):
+        try:
+            query_date = (
+                datetime.now(TZ) - pd.Timedelta(days=back_days)
+            ).strftime('%Y%m%d')
+
+            resp = requests.get(
+                'https://www.twse.com.tw/fund/BFI82U',
+                params={'response': 'json', 'dayDate': query_date, 'type': 'day'},
+                headers=headers,
+                timeout=20
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+
+            print(f'[外資賣超] {query_date} 回傳內容：', payload)
+
+            tables = payload.get('tables') or []
+            if tables:
+                fields = tables[0].get('fields') or []
+                data_rows = tables[0].get('data') or []
+            else:
+                fields = payload.get('fields') or []
+                data_rows = payload.get('data') or []
+
+            if not fields or not data_rows:
+                print(f'[外資賣超] {query_date} 沒有資料，可能非交易日')
+                continue
+
+            print(f'[外資賣超] {query_date} 欄位：', fields)
+
+            diff_col = next(
+                (i for i, f in enumerate(fields) if '買賣差額' in f or '買賣超' in f),
+                None
+            )
+
+            if diff_col is None:
+                print(f'[外資賣超] {query_date} 找不到買賣差額欄位，實際欄位如上')
+                continue
+
+            foreign_row = next(
+                (row for row in data_rows if '外資' in str(row[0])),
+                None
+            )
+
+            if foreign_row is None:
+                print(f'[外資賣超] {query_date} 找不到外資那一列，實際資料：', data_rows)
+                continue
+
+            net_value = float(str(foreign_row[diff_col]).replace(',', ''))
+            print(f'[外資賣超] {query_date} 外資買賣差額(元)：{net_value}')
+            return net_value, query_date
+
+        except Exception as error:
+            print(f'[外資賣超] 抓取失敗({back_days}天前)：', repr(error))
+
+    return None, None
+
+
+def fetch_foreign_futures_short_oi():
+    """
+    外資在臺股期貨的未平倉空單口數。
+    資料來源：openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate
+    （三大法人-區分各期貨契約-依日期），只回傳最新一個交易日，不支援查歷史日期。
+    這支API的ContractCode/Item實際文字內容沒辦法連線驗證，抓不到會印出完整資料方便校正。
+    """
+    try:
+        resp = requests.get(
+            'https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate',
+            timeout=30
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+
+        print('[外資期貨空單] 資料筆數：', len(rows))
+        if rows:
+            print('[外資期貨空單] 第一筆範例：', rows[0])
+
+        if not rows:
+            return None, None
+
+        target_row = next(
+            (
+                row for row in rows
+                if '臺股期貨' in str(row.get('ContractCode', ''))
+                and '外資' in str(row.get('Item', ''))
+            ),
+            None
+        )
+
+        if target_row is None:
+            print('[外資期貨空單] 找不到臺股期貨+外資的資料列，實際欄位範例：', rows[0] if rows else None)
+            return None, None
+
+        short_oi = float(str(target_row.get('OpenInterest(Short)', '')).replace(',', ''))
+        query_date = str(target_row.get('Date', '')).strip()
+
+        print(f'[外資期貨空單] {query_date} 未平倉空單口數：{short_oi}')
+        return short_oi, query_date
+
+    except Exception as error:
+        print('[外資期貨空單] 抓取失敗：', repr(error))
+        return None, None
+
+
+def fetch_institutional_net_buy():
+    """
+    三大法人(外資、投信、自營商)合計買賣超金額(元)。
+    資料來源：www.twse.com.tw/fund/BFI82U（三大法人買賣金額統計表），
+    格式跟MI_MARGN舊版一樣可能包在'tables'裡，也支援date參數查歷史。
+    這支URL/欄位名稱沒辦法連線驗證，抓不到會印出實際回傳內容方便校正。
+    """
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Linux; Android 13) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/126.0 Mobile Safari/537.36'
+        )
+    }
+
+    for back_days in range(6):
+        try:
+            query_date = (
+                datetime.now(TZ) - pd.Timedelta(days=back_days)
+            ).strftime('%Y%m%d')
+
+            resp = requests.get(
+                'https://www.twse.com.tw/fund/BFI82U',
+                params={'response': 'json', 'dayDate': query_date, 'type': 'day'},
+                headers=headers,
+                timeout=20
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+
+            print(f'[法人買賣超] {query_date} 回傳內容：', payload)
+
+            tables = payload.get('tables') or []
+            if tables:
+                fields = tables[0].get('fields') or []
+                data_rows = tables[0].get('data') or []
+            else:
+                fields = payload.get('fields') or []
+                data_rows = payload.get('data') or []
+
+            if not fields or not data_rows:
+                print(f'[法人買賣超] {query_date} 沒有資料，可能非交易日')
+                continue
+
+            print(f'[法人買賣超] {query_date} 欄位：', fields)
+
+            diff_col = next(
+                (i for i, f in enumerate(fields) if '買賣差額' in f or '買賣超' in f),
+                None
+            )
+
+            if diff_col is None:
+                print(f'[法人買賣超] {query_date} 找不到買賣差額欄位，實際欄位如上')
+                continue
+
+            total_net = 0.0
+            for row in data_rows:
+                try:
+                    total_net += float(str(row[diff_col]).replace(',', ''))
+                except (ValueError, IndexError, TypeError):
+                    continue
+
+            print(f'[法人買賣超] {query_date} 合計淨額(元)：{total_net}')
+            return total_net, query_date
+
+        except Exception as error:
+            print(f'[法人買賣超] 抓取失敗({back_days}天前)：', repr(error))
+
+    return None, None
+
+
 def fetch_market_margin_ratio():
     """
     大盤融資維持率 = Σ(個股融資今日餘額(股) × 收盤價) / 大盤融資金額今日餘額(元)
@@ -983,10 +1176,16 @@ def fetch_market_overview(history):
         'taiex_price': None,
         'taiex_change_pct': None,
         'market_pe': None,
+        'market_pb': None,
+        'market_yield': None,
         'market_vol': None,
         'margin_ratio': None,
         'revenue_yoy': None,
-        'revenue_period': None
+        'revenue_period': None,
+        'foreign_net_sell': None,
+        'foreign_net_sell_date': None,
+        'foreign_futures_short_oi': None,
+        'foreign_futures_short_oi_date': None
     }
 
     # ---- 加權指數 ----
@@ -1021,7 +1220,7 @@ def fetch_market_overview(history):
     except Exception as error:
         print('大盤波動率計算失敗：', repr(error))
 
-    # ---- 大盤本益比（改用市值加權：已發行股數 × 收盤價 當權重，接近官方算法）----
+    # ---- 大盤本益比／股價淨值比／殖利率（改用市值加權：已發行股數 × 收盤價 當權重，接近官方算法）----
     try:
         pe_resp = requests.get(
             'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL',
@@ -1030,21 +1229,36 @@ def fetch_market_overview(history):
         pe_resp.raise_for_status()
         pe_rows = pe_resp.json()
 
-        print('[大盤本益比] openapi BWIBBU_ALL 資料筆數：', len(pe_rows))
+        print('[大盤估值指標] openapi BWIBBU_ALL 資料筆數：', len(pe_rows))
 
         pe_by_code = {}
+        pb_by_code = {}
+        yield_by_code = {}
+
         for row in pe_rows:
+            code = str(row.get('Code', '')).strip()
             try:
-                code = str(row.get('Code', '')).strip()
                 pe = float(str(row.get('PEratio', '')).replace(',', ''))
                 # 排除異常極端值（例如剛轉盈、獲利極低的公司本益比會飆到數百倍），
                 # 避免少數暴衝股票把加權平均值拉爆。100倍以上視為異常濾除。
                 if 0 < pe <= 100:
                     pe_by_code[code] = pe
             except (ValueError, TypeError):
-                continue
+                pass
+            try:
+                pb = float(str(row.get('PBratio', '')).replace(',', ''))
+                if 0 < pb <= 50:
+                    pb_by_code[code] = pb
+            except (ValueError, TypeError):
+                pass
+            try:
+                dividend_yield = float(str(row.get('DividendYield', '')).replace(',', ''))
+                if dividend_yield >= 0:
+                    yield_by_code[code] = dividend_yield
+            except (ValueError, TypeError):
+                pass
 
-        if pe_by_code:
+        if pe_by_code or pb_by_code or yield_by_code:
             price_resp = requests.get(
                 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL',
                 timeout=30
@@ -1052,7 +1266,7 @@ def fetch_market_overview(history):
             price_resp.raise_for_status()
             price_rows = price_resp.json()
 
-            print('[大盤本益比] openapi STOCK_DAY_ALL 資料筆數：', len(price_rows))
+            print('[大盤估值指標] openapi STOCK_DAY_ALL 資料筆數：', len(price_rows))
 
             close_by_code = {}
             for row in price_rows:
@@ -1071,15 +1285,16 @@ def fetch_market_overview(history):
             shares_resp.raise_for_status()
             shares_rows = shares_resp.json()
 
-            print('[大盤本益比] openapi t187ap03_L(已發行股數) 資料筆數：', len(shares_rows))
+            print('[大盤估值指標] openapi t187ap03_L(已發行股數) 資料筆數：', len(shares_rows))
 
-            total_weight = 0.0
-            weighted_sum = 0.0
+            pe_weighted_sum = pe_weight = 0.0
+            pb_weighted_sum = pb_weight = 0.0
+            yield_weighted_sum = yield_weight = 0.0
 
             for row in shares_rows:
                 try:
                     code = str(row.get('公司代號', '')).strip()
-                    if code not in pe_by_code or code not in close_by_code:
+                    if code not in close_by_code:
                         continue
 
                     shares = float(
@@ -1090,14 +1305,30 @@ def fetch_market_overview(history):
                         continue
 
                     market_cap = shares * close_by_code[code]
-                    weighted_sum += pe_by_code[code] * market_cap
-                    total_weight += market_cap
+
+                    if code in pe_by_code:
+                        pe_weighted_sum += pe_by_code[code] * market_cap
+                        pe_weight += market_cap
+                    if code in pb_by_code:
+                        pb_weighted_sum += pb_by_code[code] * market_cap
+                        pb_weight += market_cap
+                    if code in yield_by_code:
+                        yield_weighted_sum += yield_by_code[code] * market_cap
+                        yield_weight += market_cap
                 except (ValueError, TypeError):
                     continue
 
-            if total_weight > 0:
-                result['market_pe'] = weighted_sum / total_weight
-                print('[大盤本益比] 市值加權計算結果：', result['market_pe'])
+            if pe_weight > 0:
+                result['market_pe'] = pe_weighted_sum / pe_weight
+                print('[大盤估值指標] 本益比市值加權結果：', result['market_pe'])
+            if pb_weight > 0:
+                result['market_pb'] = pb_weighted_sum / pb_weight
+                print('[大盤估值指標] 股價淨值比市值加權結果：', result['market_pb'])
+            if yield_weight > 0:
+                result['market_yield'] = yield_weighted_sum / yield_weight
+                print('[大盤估值指標] 殖利率市值加權結果：', result['market_yield'])
+    except Exception as error:
+        print('大盤估值指標抓取失敗：', repr(error))
     except Exception as error:
         print('大盤本益比抓取失敗：', repr(error))
 
@@ -1120,6 +1351,22 @@ def fetch_market_overview(history):
         result['revenue_period'] = period
     except Exception as error:
         print('上市公司YoY整體流程失敗：', repr(error))
+
+    # ---- 外資賣超 ----
+    try:
+        net_value, net_date = fetch_foreign_net_sell()
+        result['foreign_net_sell'] = net_value
+        result['foreign_net_sell_date'] = net_date
+    except Exception as error:
+        print('外資賣超整體流程失敗：', repr(error))
+
+    # ---- 外資期貨未平倉空單 ----
+    try:
+        short_oi, oi_date = fetch_foreign_futures_short_oi()
+        result['foreign_futures_short_oi'] = short_oi
+        result['foreign_futures_short_oi_date'] = oi_date
+    except Exception as error:
+        print('外資期貨空單整體流程失敗：', repr(error))
 
     return result
 
@@ -1792,7 +2039,7 @@ def main():
     grid = fig.add_gridspec(
         3,
         2,
-        height_ratios=[1.55, 4.35, 4.35],
+        height_ratios=[1.9, 4.2, 4.2],
         hspace=0.04,
         wspace=0.06,
         left=0.03,
@@ -1842,6 +2089,20 @@ def main():
             if value <= 20:
                 return 'yellow'
             return 'green'
+        if kind == 'pb':
+            if value < 1:
+                return 'green'
+            if value <= 2:
+                return 'yellow'
+            return 'red'
+        if kind == 'yield':
+            if value > 4:
+                return 'green'
+            return 'red'
+        if kind == 'foreign_sell':
+            if value > 0:
+                return 'green'
+            return 'red'
         return 'yellow'
 
     revenue_note = ''
@@ -1864,14 +2125,26 @@ def main():
         except (ValueError, IndexError):
             revenue_note = f"（{raw_period}）"
 
-    # ---- 左欄：加權 / 漲跌幅 / 日期 ----
+    foreign_net = market.get('foreign_net_sell')
+    if foreign_net is not None:
+        foreign_net_display = f"{foreign_net / 1e8:+.1f}億"
+    else:
+        foreign_net_display = 'N/A'
+
+    short_oi = market.get('foreign_futures_short_oi')
+    if short_oi is not None:
+        short_oi_display = f"{short_oi:,.0f}口"
+    else:
+        short_oi_display = 'N/A'
+
+    # ---- 左欄：加權 / 漲跌幅 / 本益比 / 股淨比 / YoY ----
     left_x = 0.03
 
     title_ax.text(
         left_x,
-        0.88,
+        0.92,
         f"加權 {fmt(market['taiex_price'], digits=2)}",
-        fontsize=30,
+        fontsize=26,
         fontweight='bold',
         ha='left',
         va='top',
@@ -1886,42 +2159,23 @@ def main():
 
     title_ax.text(
         left_x,
-        0.52,
+        0.72,
         f"漲跌幅 {change_text}",
-        fontsize=24,
+        fontsize=20,
         ha='left',
         va='center',
         color=TEXT_DIM,
         alpha=0.95
     )
 
-    title_ax.text(
-        left_x,
-        0.18,
-        (
-            '日期：'
-            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
-        ),
-        fontsize=18,
-        ha='left',
-        va='center',
-        color=TEXT_DIM,
-        alpha=0.85
-    )
-
-    # ---- 右欄：本益比 / 波動率 / 維持率 / YoY ----
-    right_x = 0.66
-
-    metric_rows = [
+    left_metric_rows = [
         ('本益比', market['market_pe'], '', 'pe', ''),
-        ('波動率', market['market_vol'], '%', 'vol', ''),
-        ('維持率', market['margin_ratio'], '%', 'margin', ''),
+        ('股淨比', market.get('market_pb'), '', 'pb', ''),
         ('YoY', market['revenue_yoy'], '%', 'revenue_yoy', revenue_note),
     ]
+    left_row_ys = [0.50, 0.30, 0.10]
 
-    row_ys = [0.90, 0.68, 0.46, 0.24]
-
-    for (label, value, suffix, kind, note), y in zip(metric_rows, row_ys):
+    for (label, value, suffix, kind, note), y in zip(left_metric_rows, left_row_ys):
         if value is not None:
             draw_signal_light(
                 fig, title_ax,
@@ -1930,14 +2184,77 @@ def main():
                     pe_mean=market.get('market_pe_mean'),
                     pe_std=market.get('market_pe_std')
                 ),
-                x=right_x, y=y, r_px=13
+                x=left_x, y=y, r_px=12
             )
+
+        title_ax.text(
+            left_x + 0.03,
+            y,
+            f"{label} {fmt(value, suffix=suffix)}{note}",
+            fontsize=20,
+            ha='left',
+            va='center',
+            color=TEXT_DIM,
+            alpha=0.95
+        )
+
+    # ---- 右欄：日期 / 外資未平倉期貨空單 / 外資賣超 / 維持率 / 波動率 ----
+    right_x = 0.66
+
+    title_ax.text(
+        right_x,
+        0.92,
+        (
+            '日期：'
+            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
+        ),
+        fontsize=18,
+        ha='left',
+        va='top',
+        color=TEXT_DIM,
+        alpha=0.85
+    )
+
+    # 外資期貨空單沒有指定燈號規則，只顯示數字不畫燈
+    title_ax.text(
+        right_x,
+        0.72,
+        f"外未平倉 {short_oi_display}",
+        fontsize=20,
+        ha='left',
+        va='center',
+        color=TEXT_DIM,
+        alpha=0.95
+    )
+
+    right_metric_rows = [
+        ('外資賣超', None, '', 'foreign_sell', '', foreign_net_display, foreign_net),
+        ('維持率', market['margin_ratio'], '%', 'margin', '', None, None),
+        ('波動率', market['market_vol'], '%', 'vol', '', None, None),
+    ]
+    right_row_ys = [0.50, 0.30, 0.10]
+
+    for (label, value, suffix, kind, note, override_text, light_override), y in zip(right_metric_rows, right_row_ys):
+        light_value = light_override if light_override is not None else value
+
+        if light_value is not None:
+            draw_signal_light(
+                fig, title_ax,
+                metric_state(
+                    kind, light_value,
+                    pe_mean=market.get('market_pe_mean'),
+                    pe_std=market.get('market_pe_std')
+                ),
+                x=right_x, y=y, r_px=12
+            )
+
+        display_text = override_text if override_text is not None else f"{fmt(value, suffix=suffix)}{note}"
 
         title_ax.text(
             right_x + 0.03,
             y,
-            f"{label} {fmt(value, suffix=suffix)}{note}",
-            fontsize=24,
+            f"{label} {display_text}",
+            fontsize=20,
             ha='left',
             va='center',
             color=TEXT_DIM,
@@ -2069,6 +2386,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
