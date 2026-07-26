@@ -1600,23 +1600,17 @@ def main():
                 return 'green'
             return 'yellow'
         if kind == 'margin':
-            if value >= 160:
-                return 'green'
-            if value >= 130:
-                return 'yellow'
-            return 'red'
+            if value < 130:
+                return 'red'
+            return 'green'
         if kind == 'vol':
-            if value < 20:
-                return 'green'
-            if value <= 30:
-                return 'yellow'
-            return 'red'
+            if value > 25:
+                return 'red'
+            return 'green'
         if kind == 'revenue_yoy':
-            if value > 20:
-                return 'green'
-            if value >= 0:
-                return 'yellow'
-            return 'red'
+            if value < 0:
+                return 'red'
+            return 'green'
         return 'yellow'
 
     # ---- 左欄：加權指數 / 漲跌幅 / 更新時間 ----
