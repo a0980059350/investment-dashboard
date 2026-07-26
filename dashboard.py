@@ -729,7 +729,7 @@ def fetch_ndc_business_indicators():
         file_resp.raise_for_status()
         content = file_resp.content
 
-        target_df = None
+        merged_df = None
         try:
             zf = zipfile.ZipFile(io.BytesIO(content))
             names = zf.namelist()
@@ -752,31 +752,51 @@ def fetch_ndc_business_indicators():
                         continue
 
                     cols = [str(c) for c in candidate_df.columns]
-                    print(f'[國發會景氣指標] {name} 欄位預覽：', cols[:8])
+                    print(f'[國發會景氣指標] {name} 欄位：', cols)
 
-                    # zip裡有manifest.csv這類「說明檔案結構」的清單，不是實際資料，
-                    # 要確認真的含有我們要的欄位才採用，不能抓到第一個能讀的csv就用。
-                    if any('景氣對策信號' in c or '海關出口值' in c for c in cols):
-                        target_df = candidate_df
-                        break
+                    date_key = next(
+                        (c for c in cols if str(c).strip() in ('Date', '年月', '日期')),
+                        None
+                    )
+
+                    # zip裡有manifest.csv這類「說明檔案結構」的清單，也有拆成多個
+                    # 檔案的原始資料(領先/同時/落後指標各自一份)，只有帶日期欄位
+                    # 的才是真正的時間序列資料，其他一律跳過，全部依日期合併起來。
+                    if date_key is None:
+                        continue
+
+                    candidate_df = candidate_df.rename(columns={date_key: '_date_key_'})
+
+                    if merged_df is None:
+                        merged_df = candidate_df
+                    else:
+                        merged_df = merged_df.merge(
+                            candidate_df,
+                            on='_date_key_',
+                            how='outer',
+                            suffixes=('', '_dup')
+                        )
 
                 except Exception as inner_error:
                     print(f'[國發會景氣指標] 讀取{name}失敗：', repr(inner_error))
                     continue
         except zipfile.BadZipFile:
-            target_df = pd.read_csv(io.BytesIO(content), encoding='utf-8-sig')
+            merged_df = pd.read_csv(io.BytesIO(content), encoding='utf-8-sig')
+            date_key = next(
+                (c for c in merged_df.columns if str(c).strip() in ('Date', '年月', '日期')),
+                merged_df.columns[0]
+            )
+            merged_df = merged_df.rename(columns={date_key: '_date_key_'})
 
-        if target_df is None or target_df.empty:
-            print('[國發會景氣指標] 解壓/讀取後找不到含目標欄位的資料檔')
+        if merged_df is None or merged_df.empty:
+            print('[國發會景氣指標] 解壓/讀取後找不到可用的時間序列資料')
             return result
 
-        print('[國發會景氣指標] 欄位：', list(target_df.columns))
+        merged_df = merged_df.sort_values('_date_key_').reset_index(drop=True)
+        target_df = merged_df
+        date_col = '_date_key_'
 
-        date_col = next(
-            (c for c in target_df.columns
-             if str(c).strip() in ('Date', '年月', '日期')),
-            target_df.columns[0]
-        )
+        print('[國發會景氣指標] 合併後欄位：', list(target_df.columns))
 
         # ---- 景氣對策信號 ----
         signal_col = next(
