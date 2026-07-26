@@ -1301,8 +1301,8 @@ def fetch_market_overview(history):
 
             print('[大盤估值指標] openapi t187ap03_L(已發行股數) 資料筆數：', len(shares_rows))
 
-            pe_weighted_sum = pe_weight = 0.0
-            pb_weighted_sum = pb_weight = 0.0
+            pe_total_market_cap = pe_total_earnings = 0.0
+            pb_total_market_cap = pb_total_book_value = 0.0
             yield_weighted_sum = yield_weight = 0.0
 
             for row in shares_rows:
@@ -1321,23 +1321,30 @@ def fetch_market_overview(history):
                     market_cap = shares * close_by_code[code]
 
                     if code in pe_by_code:
-                        pe_weighted_sum += pe_by_code[code] * market_cap
-                        pe_weight += market_cap
+                        # 本益比改用「總市值 ÷ 總獲利」算法，跟股淨比同一套邏輯，
+                        # 兩個指標才一致。獲利用 市值/PE 反推，不用額外抓財報獲利數字。
+                        earnings = market_cap / pe_by_code[code]
+                        pe_total_market_cap += market_cap
+                        pe_total_earnings += earnings
                     if code in pb_by_code:
-                        pb_weighted_sum += pb_by_code[code] * market_cap
-                        pb_weight += market_cap
+                        # 股淨比改用「總市值 ÷ 總淨值」算法，比市值加權平均更接近
+                        # 官方對「整體股淨比」的定義。淨值用 市值/PB 反推，
+                        # 不用額外抓每股淨值(BVPS)資料。
+                        book_value = market_cap / pb_by_code[code]
+                        pb_total_market_cap += market_cap
+                        pb_total_book_value += book_value
                     if code in yield_by_code:
                         yield_weighted_sum += yield_by_code[code] * market_cap
                         yield_weight += market_cap
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, ZeroDivisionError):
                     continue
 
-            if pe_weight > 0:
-                result['market_pe'] = pe_weighted_sum / pe_weight
-                print('[大盤估值指標] 本益比市值加權結果：', result['market_pe'])
-            if pb_weight > 0:
-                result['market_pb'] = pb_weighted_sum / pb_weight
-                print('[大盤估值指標] 股價淨值比市值加權結果：', result['market_pb'])
+            if pe_total_earnings > 0:
+                result['market_pe'] = pe_total_market_cap / pe_total_earnings
+                print('[大盤估值指標] 本益比(總市值/總獲利)結果：', result['market_pe'])
+            if pb_total_book_value > 0:
+                result['market_pb'] = pb_total_market_cap / pb_total_book_value
+                print('[大盤估值指標] 股價淨值比(總市值/總淨值)結果：', result['market_pb'])
                 print(
                     '[大盤估值指標] 股淨比樣本數：', len(pb_by_code),
                     '最大值：', max(pb_by_code.values()) if pb_by_code else None
