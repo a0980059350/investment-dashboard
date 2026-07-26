@@ -689,6 +689,31 @@ def update_market_pe_history(history, pe_value):
     return float(array.mean()), float(array.std()), len(recent_values)
 
 
+def _normalize_period(value):
+    """
+    把各種可能出現的日期/年月格式，統一轉成西元YYYYMM整數，方便跨檔案合併排序。
+    支援：
+    - 6碼西元年月，例如 202506 -> 202506
+    - 5碼民國年月，例如 11506 -> 202506 (115+1911=2026, 06月)
+    - 4碼西元年(只有年沒有月，理論上不該出現在月資料，當作無法辨識)
+    - 帶斜線或連字號的日期字串(如 2026/06、2026-06)，會先去除非數字字元再判斷
+    無法辨識就回傳 None，這筆資料會被跳過，不會混進合併結果。
+    """
+    if value is None:
+        return None
+    digits = re.sub(r'\D', '', str(value))
+    if len(digits) == 6:
+        return int(digits)
+    if len(digits) == 5:
+        roc_year = int(digits[:3])
+        month = int(digits[3:5])
+        return (roc_year + 1911) * 100 + month
+    if len(digits) == 7:
+        # 極少數情況日期含日(YYYYMMDD)，只取年月
+        return int(digits[:6])
+    return None
+
+
 def fetch_ndc_business_indicators():
     """
     國發會《景氣指標及燈號》資料集(data.gov.tw dataset id 6099)是一份逐月時間序列，
@@ -765,7 +790,26 @@ def fetch_ndc_business_indicators():
                     if date_key is None:
                         continue
 
+                    print(
+                        f'[國發會景氣指標] {name} 日期欄位原始範例(前3筆)：',
+                        candidate_df[date_key].head(3).tolist(),
+                        '(最後3筆)：',
+                        candidate_df[date_key].tail(3).tolist()
+                    )
+
                     candidate_df = candidate_df.rename(columns={date_key: '_date_key_'})
+                    candidate_df['_date_key_'] = candidate_df['_date_key_'].map(_normalize_period)
+                    candidate_df = candidate_df.dropna(subset=['_date_key_'])
+
+                    if candidate_df.empty:
+                        print(f'[國發會景氣指標] {name} 日期標準化後全部無法辨識，跳過')
+                        continue
+
+                    print(
+                        f'[國發會景氣指標] {name} 標準化後日期範圍：',
+                        int(candidate_df['_date_key_'].min()), '~',
+                        int(candidate_df['_date_key_'].max())
+                    )
 
                     if merged_df is None:
                         merged_df = candidate_df
@@ -787,6 +831,8 @@ def fetch_ndc_business_indicators():
                 merged_df.columns[0]
             )
             merged_df = merged_df.rename(columns={date_key: '_date_key_'})
+            merged_df['_date_key_'] = merged_df['_date_key_'].map(_normalize_period)
+            merged_df = merged_df.dropna(subset=['_date_key_'])
 
         if merged_df is None or merged_df.empty:
             print('[國發會景氣指標] 解壓/讀取後找不到可用的時間序列資料')
@@ -813,7 +859,7 @@ def fetch_ndc_business_indicators():
             if not valid.empty:
                 last_row = valid.iloc[-1]
                 result['business_cycle_signal'] = str(last_row[signal_col]).strip()
-                result['business_cycle_period'] = str(last_row[date_col]).strip()
+                result['business_cycle_period'] = str(int(last_row[date_col]))
                 if score_col:
                     try:
                         result['business_cycle_score'] = float(last_row[score_col])
