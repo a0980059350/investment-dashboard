@@ -1602,14 +1602,20 @@ def main():
         if kind == 'margin':
             if value < 130:
                 return 'red'
+            if value <= 150:
+                return 'yellow'
             return 'green'
         if kind == 'vol':
-            if value > 25:
+            if value > 35:
                 return 'red'
+            if value >= 25:
+                return 'yellow'
             return 'green'
         if kind == 'revenue_yoy':
             if value < 0:
                 return 'red'
+            if value <= 20:
+                return 'yellow'
             return 'green'
         return 'yellow'
 
