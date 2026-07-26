@@ -1744,7 +1744,24 @@ def main():
     bc_note = ''
     raw_bc_period = market.get('business_cycle_period')
     if raw_bc_period:
-        bc_note = f"（{raw_bc_period}）"
+        try:
+            period_str = str(raw_bc_period).strip()
+            digits = re.sub(r'\D', '', period_str)
+            if len(digits) == 6:
+                # 6碼：YYYYMM(西元)
+                year_4digit = int(digits[:4])
+                month = int(digits[4:6])
+                western_year_2digit = year_4digit % 100
+            elif len(digits) == 5:
+                # 5碼：民國年(3碼)+月(2碼)，例如 11506 -> 115年06月
+                roc_year = int(digits[:3])
+                month = int(digits[3:5])
+                western_year_2digit = (roc_year + 1911) % 100
+            else:
+                raise ValueError('無法辨識的日期格式')
+            bc_note = f"（{western_year_2digit:02d}／{month:02d}）"
+        except (ValueError, IndexError):
+            bc_note = f"（{raw_bc_period}）"
 
     # ---- 左欄：加權 / 漲跌幅 / 本益比 / 波動率 / 維持率 ----
     left_x = 0.03
