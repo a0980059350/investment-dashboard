@@ -563,9 +563,11 @@ def fetch_foreign_net_sell():
     return None, None
 
 
-def fetch_foreign_futures_short_oi():
+def fetch_foreign_futures_net_oi():
     """
-    外資在臺股期貨的未平倉空單口數。
+    外資在臺股期貨的未平倉「淨部位」口數(多方未平倉 - 空方未平倉)。
+    負數代表淨空單，正數代表淨多單，跟各券商/看盤軟體顯示的「外資未平倉」數字定義一致
+    (不是空方未平倉的總口數，那是完全不同、恆為正值的另一個欄位)。
     資料來源：openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate
     （三大法人-區分各期貨契約-依日期），只回傳最新一個交易日，不支援查歷史日期。
     這支API的ContractCode/Item實際文字內容沒辦法連線驗證，抓不到會印出完整資料方便校正。
@@ -578,9 +580,9 @@ def fetch_foreign_futures_short_oi():
         resp.raise_for_status()
         rows = resp.json()
 
-        print('[外資期貨空單] 資料筆數：', len(rows))
+        print('[外資期貨未平倉] 資料筆數：', len(rows))
         if rows:
-            print('[外資期貨空單] 第一筆範例：', rows[0])
+            print('[外資期貨未平倉] 第一筆範例：', rows[0])
 
         if not rows:
             return None, None
@@ -595,14 +597,14 @@ def fetch_foreign_futures_short_oi():
         )
 
         if target_row is None:
-            print('[外資期貨空單] 找不到臺股期貨+外資的資料列，實際欄位範例：', rows[0] if rows else None)
+            print('[外資期貨未平倉] 找不到臺股期貨+外資的資料列，實際欄位範例：', rows[0] if rows else None)
             return None, None
 
-        short_oi = float(str(target_row.get('OpenInterest(Short)', '')).replace(',', ''))
+        net_oi = float(str(target_row.get('OpenInterest(Net)', '')).replace(',', ''))
         query_date = str(target_row.get('Date', '')).strip()
 
-        print(f'[外資期貨空單] {query_date} 未平倉空單口數：{short_oi}')
-        return short_oi, query_date
+        print(f'[外資期貨未平倉] {query_date} 淨部位口數：{net_oi}')
+        return net_oi, query_date
 
     except Exception as error:
         print('[外資期貨空單] 抓取失敗：', repr(error))
@@ -838,39 +840,39 @@ def fetch_market_margin_ratio():
         return None
 
 
-def update_market_pe_history(history, pe_value):
+def update_market_metric_history(history, key, value):
     """
-    把每次算出來的大盤本益比累積進歷史紀錄，滾動計算近5年平均值與標準差。
-    這是用「自己累積」的方式做的，不是抓現成的5年歷史本益比資料庫（免費資料源沒有這個）。
+    通用版：把每次算出來的大盤指標(本益比、股淨比等)累積進歷史紀錄，
+    滾動計算近5年平均值與標準差。這是用「自己累積」的方式做的，
+    不是抓現成的5年歷史資料庫（免費資料源沒有這個）。
     剛開始累積天數還不夠5年時，樣本數會偏少，回傳的平均/標準差僅供參考，
     等 workflow 累積跑得夠久（理論上要滿5年）數字才會真正穩定。
     """
-    key = '大盤本益比'
-    pe_hist = history.get(key, {})
+    metric_hist = history.get(key, {})
 
-    if pe_value is not None:
+    if value is not None:
         today_str = datetime.now(TZ).strftime('%Y-%m-%d')
-        pe_hist[today_str] = float(pe_value)
+        metric_hist[today_str] = float(value)
 
     # 保留視窗設6年（比5年統計窗多留1年緩衝）
     cutoff = (
         pd.Timestamp.now(tz=TZ).tz_localize(None)
         - pd.DateOffset(years=6)
     )
-    pe_hist = {
-        date_key: value
-        for date_key, value in pe_hist.items()
+    metric_hist = {
+        date_key: v
+        for date_key, v in metric_hist.items()
         if pd.to_datetime(date_key) >= cutoff
     }
-    history[key] = pe_hist
+    history[key] = metric_hist
 
     five_year_cutoff = (
         pd.Timestamp.now(tz=TZ).tz_localize(None)
         - pd.DateOffset(years=5)
     )
     recent_values = [
-        value
-        for date_key, value in pe_hist.items()
+        v
+        for date_key, v in metric_hist.items()
         if pd.to_datetime(date_key) >= five_year_cutoff
     ]
 
@@ -880,6 +882,16 @@ def update_market_pe_history(history, pe_value):
 
     array = np.array(recent_values)
     return float(array.mean()), float(array.std()), len(recent_values)
+
+
+def update_market_pe_history(history, pe_value):
+    """大盤本益比專用包裝(沿用通用函式)，保留原函式名稱給既有呼叫端使用。"""
+    return update_market_metric_history(history, '大盤本益比', pe_value)
+
+
+def update_market_pb_history(history, pb_value):
+    """大盤股淨比專用包裝(沿用通用函式)。"""
+    return update_market_metric_history(history, '大盤股淨比', pb_value)
 
 
 def _normalize_period(value):
@@ -1184,8 +1196,8 @@ def fetch_market_overview(history):
         'revenue_period': None,
         'foreign_net_sell': None,
         'foreign_net_sell_date': None,
-        'foreign_futures_short_oi': None,
-        'foreign_futures_short_oi_date': None
+        'foreign_futures_net_oi': None,
+        'foreign_futures_net_oi_date': None
     }
 
     # ---- 加權指數 ----
@@ -1247,7 +1259,9 @@ def fetch_market_overview(history):
                 pass
             try:
                 pb = float(str(row.get('PBratio', '')).replace(',', ''))
-                if 0 < pb <= 50:
+                # 正常大盤股淨比大約落在1~5倍，50倍門檻太寬鬆，
+                # 收緊到10倍，避免少數異常個股(例如淨值接近0的公司)把平均值拉爆。
+                if 0 < pb <= 10:
                     pb_by_code[code] = pb
             except (ValueError, TypeError):
                 pass
@@ -1324,19 +1338,27 @@ def fetch_market_overview(history):
             if pb_weight > 0:
                 result['market_pb'] = pb_weighted_sum / pb_weight
                 print('[大盤估值指標] 股價淨值比市值加權結果：', result['market_pb'])
+                print(
+                    '[大盤估值指標] 股淨比樣本數：', len(pb_by_code),
+                    '最大值：', max(pb_by_code.values()) if pb_by_code else None
+                )
             if yield_weight > 0:
                 result['market_yield'] = yield_weighted_sum / yield_weight
                 print('[大盤估值指標] 殖利率市值加權結果：', result['market_yield'])
     except Exception as error:
         print('大盤估值指標抓取失敗：', repr(error))
-    except Exception as error:
-        print('大盤本益比抓取失敗：', repr(error))
 
     pe_mean, pe_std, pe_sample = update_market_pe_history(history, result['market_pe'])
     result['market_pe_mean'] = pe_mean
     result['market_pe_std'] = pe_std
     result['market_pe_sample'] = pe_sample
     print(f'[大盤本益比] 近5年統計：平均={pe_mean}, 標準差={pe_std}, 樣本數={pe_sample}')
+
+    pb_mean, pb_std, pb_sample = update_market_pb_history(history, result.get('market_pb'))
+    result['market_pb_mean'] = pb_mean
+    result['market_pb_std'] = pb_std
+    result['market_pb_sample'] = pb_sample
+    print(f'[大盤股淨比] 近5年統計：平均={pb_mean}, 標準差={pb_std}, 樣本數={pb_sample}')
 
     # ---- 大盤融資維持率 ----
     try:
@@ -1362,9 +1384,9 @@ def fetch_market_overview(history):
 
     # ---- 外資期貨未平倉空單 ----
     try:
-        short_oi, oi_date = fetch_foreign_futures_short_oi()
-        result['foreign_futures_short_oi'] = short_oi
-        result['foreign_futures_short_oi_date'] = oi_date
+        net_oi, oi_date = fetch_foreign_futures_net_oi()
+        result['foreign_futures_net_oi'] = net_oi
+        result['foreign_futures_net_oi_date'] = oi_date
     except Exception as error:
         print('外資期貨空單整體流程失敗：', repr(error))
 
@@ -2062,13 +2084,13 @@ def main():
             return 'N/A'
         return f'{value:,.{digits}f}{suffix}'
 
-    def metric_state(kind, value, pe_mean=None, pe_std=None):
+    def metric_state(kind, value, mean=None, std=None):
         if kind == 'pe':
-            if pe_mean is None or pe_std is None or pe_std <= 0:
+            if mean is None or std is None or std <= 0:
                 return 'yellow'  # 樣本數不足5年統計，無法判斷，先顯示中性黃燈
-            if value > pe_mean + pe_std:
+            if value > mean + std:
                 return 'red'
-            if value < pe_mean - pe_std:
+            if value < mean - std:
                 return 'green'
             return 'yellow'
         if kind == 'margin':
@@ -2090,11 +2112,13 @@ def main():
                 return 'yellow'
             return 'green'
         if kind == 'pb':
-            if value < 1:
+            if mean is None or std is None or std <= 0:
+                return 'yellow'  # 樣本數不足5年統計，無法判斷，先顯示中性黃燈
+            if value > mean + std:
+                return 'red'
+            if value < mean - std:
                 return 'green'
-            if value <= 2:
-                return 'yellow'
-            return 'red'
+            return 'yellow'
         if kind == 'yield':
             if value > 4:
                 return 'green'
@@ -2131,11 +2155,11 @@ def main():
     else:
         foreign_net_display = 'N/A'
 
-    short_oi = market.get('foreign_futures_short_oi')
-    if short_oi is not None:
-        short_oi_display = f"{short_oi:,.0f}口"
+    net_oi = market.get('foreign_futures_net_oi')
+    if net_oi is not None:
+        net_oi_display = f"{net_oi:+,.0f}口"
     else:
-        short_oi_display = 'N/A'
+        net_oi_display = 'N/A'
 
     # ---- 左欄：加權 / 漲跌幅 / 本益比 / 股淨比 / YoY ----
     left_x = 0.03
@@ -2177,13 +2201,16 @@ def main():
 
     for (label, value, suffix, kind, note), y in zip(left_metric_rows, left_row_ys):
         if value is not None:
+            if kind == 'pe':
+                stat_mean, stat_std = market.get('market_pe_mean'), market.get('market_pe_std')
+            elif kind == 'pb':
+                stat_mean, stat_std = market.get('market_pb_mean'), market.get('market_pb_std')
+            else:
+                stat_mean, stat_std = None, None
+
             draw_signal_light(
                 fig, title_ax,
-                metric_state(
-                    kind, value,
-                    pe_mean=market.get('market_pe_mean'),
-                    pe_std=market.get('market_pe_std')
-                ),
+                metric_state(kind, value, mean=stat_mean, std=stat_std),
                 x=left_x, y=y, r_px=12
             )
 
@@ -2219,7 +2246,7 @@ def main():
     title_ax.text(
         right_x,
         0.72,
-        f"外未平倉 {short_oi_display}",
+        f"外未平倉 {net_oi_display}",
         fontsize=20,
         ha='left',
         va='center',
@@ -2240,11 +2267,7 @@ def main():
         if light_value is not None:
             draw_signal_light(
                 fig, title_ax,
-                metric_state(
-                    kind, light_value,
-                    pe_mean=market.get('market_pe_mean'),
-                    pe_std=market.get('market_pe_std')
-                ),
+                metric_state(kind, light_value),
                 x=right_x, y=y, r_px=12
             )
 
