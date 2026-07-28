@@ -716,12 +716,16 @@ def fetch_market_margin_ratio():
     """
     大盤融資維持率 = Σ(個股融資今日餘額(股) × 收盤價) / 大盤融資金額今日餘額(元)
 
-    分母：www.twse.com.tw 舊版 MI_MARGN?selectType=MS（集中市場信用交易統計彙總，
-         'tables'結構包著'融資金額(仟元)'的今日餘額，支援date參數查歷史）。
+    分子：openapi.twse.com.tw/v1/exchangeReport/MI_MARGN——真正「每檔個股」的
+         融資餘額（舊版selectType=ALL其實仍是集中市場加總，不是個股，踩了一次坑）。
+         OpenAPI版本不支援查歷史日期，永遠只回傳最新一個交易日，這天是多少
+         由TWSE自己的更新進度決定，我們沒辦法指定。
 
-    分子：openapi.twse.com.tw/v1/exchangeReport/MI_MARGN——這才是真正「每檔個股」
-         的融資餘額（舊版selectType=ALL其實仍是集中市場加總，不是個股，踩了一次坑）。
-         OpenAPI版本不支援查歷史日期，永遠只回傳最新一個交易日。
+    分母：www.twse.com.tw 舊版 MI_MARGN?selectType=MS（集中市場信用交易統計彙總，
+         'tables'結構包著'融資金額(仟元)'的今日餘額）。這支支援date參數查歷史，
+         所以改成「分子有哪一天的資料，就去抓同一天的分母」，而不是各自抓各自
+         最新的，避免兩邊日期對不上時algorithm混算出一個兩邊都不是的假數字
+         (之前173%/180%失真的根因就是這裡)。
     """
     headers = {
         'User-Agent': (
@@ -731,62 +735,15 @@ def fetch_market_margin_ratio():
         )
     }
 
-    total_margin_amount = None
-    matched_date = None
+    def to_western_yyyymmdd(date_value):
+        """把民國年(如1150724，7碼)或西元年(如20260724，8碼)統一轉成西元8碼字串。"""
+        digits = str(date_value).strip()
+        if len(digits) == 7:
+            roc_year = int(digits[:3])
+            return f'{roc_year + 1911}{digits[3:]}'
+        return digits
 
-    # ---- 分母：找最近一個有資料的交易日的大盤融資金額今日餘額 ----
-    for back_days in range(6):
-        try:
-            query_date = (
-                datetime.now(TZ) - pd.Timedelta(days=back_days)
-            ).strftime('%Y%m%d')
-
-            ms_resp = requests.get(
-                'https://www.twse.com.tw/exchangeReport/MI_MARGN',
-                params={'response': 'json', 'date': query_date, 'selectType': 'MS'},
-                headers=headers,
-                timeout=20
-            )
-            ms_resp.raise_for_status()
-            ms_payload = ms_resp.json()
-
-            ms_tables = ms_payload.get('tables') or []
-            if not ms_tables:
-                print(f'[融資維持率] {query_date} MS 沒有tables，可能非交易日')
-                continue
-
-            credit_fields = ms_tables[0].get('fields') or []
-            credit_list = ms_tables[0].get('data') or []
-
-            balance_col = next(
-                (i for i, f in enumerate(credit_fields) if '今日餘額' in f),
-                None
-            )
-            amount_row = next(
-                (row for row in credit_list if '融資金額' in str(row[0])),
-                None
-            )
-
-            if balance_col is None or amount_row is None:
-                print('[融資維持率] MI_MARGN(MS) 欄位對不上，實際欄位：', credit_fields)
-                continue
-
-            amount = float(str(amount_row[balance_col]).replace(',', '')) * 1000
-
-            if amount > 0:
-                total_margin_amount = amount
-                matched_date = query_date
-                print(f'[融資維持率] 分母取自 {query_date}，金額={amount}')
-                break
-
-        except Exception as error:
-            print(f'[融資維持率] 分母抓取失敗({back_days}天前)：', repr(error))
-
-    if total_margin_amount is None:
-        print('[融資維持率] 找不到有效分母，放棄')
-        return None, None
-
-    # ---- 分子：openapi 每檔個股融資今日餘額 × 收盤價 ----
+    # ---- 分子：openapi 每檔個股融資今日餘額 × 收盤價（這天由TWSE決定，我們只能接受）----
     try:
         margin_resp = requests.get(
             'https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN',
@@ -823,22 +780,13 @@ def fetch_market_margin_ratio():
         price_resp.raise_for_status()
         price_rows = price_resp.json()
 
-        numerator_date = None
-        if price_rows:
-            numerator_date = price_rows[0].get('Date')
+        numerator_date = price_rows[0].get('Date') if price_rows else None
+        if not numerator_date:
+            print('[融資維持率] STOCK_DAY_ALL 沒有日期欄位，放棄')
+            return None, None
 
-        def to_western_yyyymmdd(date_value):
-            """把民國年(如1150724，7碼)或西元年(如20260724，8碼)統一轉成西元8碼字串比較"""
-            digits = str(date_value).strip()
-            if len(digits) == 7:
-                roc_year = int(digits[:3])
-                return f'{roc_year + 1911}{digits[3:]}'
-            return digits
-
-        print(f'[融資維持率] 分子日期(STOCK_DAY_ALL) = {numerator_date}，分母日期(MS) = {matched_date}')
-        if numerator_date and matched_date:
-            if to_western_yyyymmdd(numerator_date) != to_western_yyyymmdd(matched_date):
-                print('[融資維持率] 警告：分子與分母不是同一天，計算結果可能有落差')
+        target_date = to_western_yyyymmdd(numerator_date)
+        print(f'[融資維持率] 分子日期(STOCK_DAY_ALL) = {numerator_date} → {target_date}')
 
         close_prices = {}
         for row in price_rows:
@@ -855,19 +803,79 @@ def fetch_market_margin_ratio():
             if code in close_prices
         )
 
-        print(
-            f'[融資維持率] margin_value={margin_value}, '
-            f'total_margin_amount={total_margin_amount}（分母日期 {matched_date}）'
-        )
-
         if margin_value <= 0:
             return None, None
-
-        return margin_value / total_margin_amount * 100, matched_date
 
     except Exception as error:
         print('[融資維持率] 分子抓取失敗：', repr(error))
         return None, None
+
+    # ---- 分母：強制抓「跟分子同一天」的大盤融資金額今日餘額，兩邊日期保證對齊 ----
+    # 保留小幅往前找的容錯（最多3天），只為了應付當天MS報表暫時抓取失敗
+    # (例如502)的狀況，而不是為了對齊日期去找別的日期。
+    total_margin_amount = None
+    matched_date = None
+
+    for back_days in range(3):
+        query_date = (
+            pd.Timestamp(target_date) - pd.Timedelta(days=back_days)
+        ).strftime('%Y%m%d')
+
+        try:
+            ms_resp = requests.get(
+                'https://www.twse.com.tw/exchangeReport/MI_MARGN',
+                params={'response': 'json', 'date': query_date, 'selectType': 'MS'},
+                headers=headers,
+                timeout=20
+            )
+            ms_resp.raise_for_status()
+            ms_payload = ms_resp.json()
+
+            ms_tables = ms_payload.get('tables') or []
+            if not ms_tables:
+                print(f'[融資維持率] {query_date} MS 沒有tables，重試更早的日期')
+                continue
+
+            credit_fields = ms_tables[0].get('fields') or []
+            credit_list = ms_tables[0].get('data') or []
+
+            balance_col = next(
+                (i for i, f in enumerate(credit_fields) if '今日餘額' in f),
+                None
+            )
+            amount_row = next(
+                (row for row in credit_list if '融資金額' in str(row[0])),
+                None
+            )
+
+            if balance_col is None or amount_row is None:
+                print('[融資維持率] MI_MARGN(MS) 欄位對不上，實際欄位：', credit_fields)
+                continue
+
+            amount = float(str(amount_row[balance_col]).replace(',', '')) * 1000
+
+            if amount > 0:
+                total_margin_amount = amount
+                matched_date = query_date
+                print(f'[融資維持率] 分母取自 {query_date}，金額={amount}')
+                break
+
+        except Exception as error:
+            print(f'[融資維持率] 分母抓取失敗({query_date})：', repr(error))
+
+    if total_margin_amount is None or matched_date != target_date:
+        print(
+            f'[融資維持率] 找不到與分子同一天({target_date})的分母資料，'
+            '放棄計算(避免跨日期混算出失真數字)'
+        )
+        return None, None
+
+    print(
+        f'[融資維持率] margin_value={margin_value}, '
+        f'total_margin_amount={total_margin_amount}（日期 {matched_date}，分子分母已對齊）'
+    )
+
+    return margin_value / total_margin_amount * 100, matched_date
 
 
 def update_market_metric_history(history, key, value):
