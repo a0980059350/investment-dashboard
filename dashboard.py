@@ -161,6 +161,29 @@ def parse_fund_value(value):
     return pd.to_numeric(text, errors='coerce')
 
 
+def format_date_suffix(date_value):
+    """
+    把各種日期格式(西元8碼如 20260728、民國7碼如 1150728)統一轉成
+    畫面上要顯示的「（MM/DD）」後綴，方便標示每項數據實際對應的資料日期。
+    無法辨識或空值時回傳空字串，不影響原本畫面排版。
+    """
+    if not date_value:
+        return ''
+
+    digits = re.sub(r'\D', '', str(date_value))
+
+    try:
+        if len(digits) == 7:
+            month, day = digits[3:5], digits[5:7]
+        elif len(digits) == 8:
+            month, day = digits[4:6], digits[6:8]
+        else:
+            return ''
+        return f'（{month}/{day}）'
+    except Exception:
+        return ''
+
+
 EXCLUDE_VALUE_KEYWORDS = ('累計', '指數', '報酬', '成長', '規模', '配息')
 
 
@@ -761,7 +784,7 @@ def fetch_market_margin_ratio():
 
     if total_margin_amount is None:
         print('[融資維持率] 找不到有效分母，放棄')
-        return None
+        return None, None
 
     # ---- 分子：openapi 每檔個股融資今日餘額 × 收盤價 ----
     try:
@@ -790,7 +813,7 @@ def fetch_market_margin_ratio():
         print('[融資維持率] 有效融資個股數：', len(margin_shares))
 
         if not margin_shares:
-            return None
+            return None, None
 
         price_resp = requests.get(
             'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL',
@@ -838,13 +861,13 @@ def fetch_market_margin_ratio():
         )
 
         if margin_value <= 0:
-            return None
+            return None, None
 
-        return margin_value / total_margin_amount * 100
+        return margin_value / total_margin_amount * 100, matched_date
 
     except Exception as error:
         print('[融資維持率] 分子抓取失敗：', repr(error))
-        return None
+        return None, None
 
 
 def update_market_metric_history(history, key, value):
@@ -1194,11 +1217,16 @@ def fetch_market_overview(history):
     result = {
         'taiex_price': None,
         'taiex_change_pct': None,
+        'taiex_date': None,
         'market_pe': None,
+        'market_pe_date': None,
         'market_pb': None,
+        'market_pb_date': None,
         'market_yield': None,
         'market_vol': None,
+        'market_vol_date': None,
         'margin_ratio': None,
+        'margin_ratio_date': None,
         'revenue_yoy': None,
         'revenue_period': None,
         'foreign_net_sell': None,
@@ -1216,6 +1244,7 @@ def fetch_market_overview(history):
             live_prev_close = float(info['previous_close'])
 
         result['taiex_price'] = live_price
+        result['taiex_date'] = datetime.now(TZ).strftime('%Y%m%d')
         if live_prev_close:
             result['taiex_change_pct'] = live_price / live_prev_close - 1
     except Exception as error:
@@ -1236,6 +1265,7 @@ def fetch_market_overview(history):
         result['market_vol'] = float(
             twii_ret.tail(20).std() * np.sqrt(252) * 100
         )
+        result['market_vol_date'] = twii_hist.index[-1].strftime('%Y%m%d')
     except Exception as error:
         print('大盤波動率計算失敗：', repr(error))
 
@@ -1288,6 +1318,8 @@ def fetch_market_overview(history):
             price_rows = price_resp.json()
 
             print('[大盤估值指標] openapi STOCK_DAY_ALL 資料筆數：', len(price_rows))
+
+            valuation_date = price_rows[0].get('Date') if price_rows else None
 
             close_by_code = {}
             for row in price_rows:
@@ -1360,9 +1392,11 @@ def fetch_market_overview(history):
 
             if pe_total_earnings > 0:
                 result['market_pe'] = pe_total_market_cap / pe_total_earnings
+                result['market_pe_date'] = valuation_date
                 print('[大盤估值指標] 本益比(總市值/總獲利)結果：', result['market_pe'])
             if pb_total_book_value > 0:
                 result['market_pb'] = pb_total_market_cap / pb_total_book_value
+                result['market_pb_date'] = valuation_date
                 print('[大盤估值指標] 股價淨值比(總市值/總淨值)結果：', result['market_pb'])
                 print(
                     '[大盤估值指標] 股淨比樣本數：', len(pb_by_code),
@@ -1388,7 +1422,9 @@ def fetch_market_overview(history):
 
     # ---- 大盤融資維持率 ----
     try:
-        result['margin_ratio'] = fetch_market_margin_ratio()
+        margin_ratio, margin_ratio_date = fetch_market_margin_ratio()
+        result['margin_ratio'] = margin_ratio
+        result['margin_ratio_date'] = margin_ratio_date
     except Exception as error:
         print('大盤融資維持率整體流程失敗：', repr(error))
 
@@ -2190,10 +2226,12 @@ def main():
     # ---- 左欄：加權 / 漲跌幅 / 本益比 / 股淨比 / YoY ----
     left_x = 0.03
 
+    taiex_date_note = format_date_suffix(market.get('taiex_date'))
+
     title_ax.text(
         left_x,
         0.92,
-        f"加權 {fmt(market['taiex_price'], digits=2)}",
+        f"加權 {fmt(market['taiex_price'], digits=2)}{taiex_date_note}",
         fontsize=26,
         fontweight='bold',
         ha='left',
@@ -2210,7 +2248,7 @@ def main():
     title_ax.text(
         left_x,
         0.72,
-        f"漲跌幅 {change_text}",
+        f"漲跌幅 {change_text}{taiex_date_note}",
         fontsize=20,
         ha='left',
         va='center',
@@ -2219,8 +2257,8 @@ def main():
     )
 
     left_metric_rows = [
-        ('本益比', market['market_pe'], '', 'pe', ''),
-        ('股淨比', market.get('market_pb'), '', 'pb', ''),
+        ('本益比', market['market_pe'], '', 'pe', format_date_suffix(market.get('market_pe_date'))),
+        ('股淨比', market.get('market_pb'), '', 'pb', format_date_suffix(market.get('market_pb_date'))),
         ('YoY', market['revenue_yoy'], '%', 'revenue_yoy', revenue_note),
     ]
     left_row_ys = [0.50, 0.30, 0.10]
@@ -2272,7 +2310,7 @@ def main():
     title_ax.text(
         right_x,
         0.72,
-        f"外未平倉 {net_oi_display}",
+        f"外資未平倉 {net_oi_display}{format_date_suffix(market.get('foreign_futures_net_oi_date'))}",
         fontsize=20,
         ha='left',
         va='center',
@@ -2281,9 +2319,21 @@ def main():
     )
 
     right_metric_rows = [
-        ('外資賣超', None, '', 'foreign_sell', '', foreign_net_display, foreign_net),
-        ('維持率', market['margin_ratio'], '%', 'margin', '', None, None),
-        ('波動率', market['market_vol'], '%', 'vol', '', None, None),
+        (
+            '外資賣超', None, '', 'foreign_sell',
+            format_date_suffix(market.get('foreign_net_sell_date')),
+            foreign_net_display, foreign_net
+        ),
+        (
+            '維持率', market['margin_ratio'], '%', 'margin',
+            format_date_suffix(market.get('margin_ratio_date')),
+            None, None
+        ),
+        (
+            '波動率', market['market_vol'], '%', 'vol',
+            format_date_suffix(market.get('market_vol_date')),
+            None, None
+        ),
     ]
     right_row_ys = [0.50, 0.30, 0.10]
 
@@ -2297,7 +2347,8 @@ def main():
                 x=right_x, y=y, r_px=12
             )
 
-        display_text = override_text if override_text is not None else f"{fmt(value, suffix=suffix)}{note}"
+        display_value = override_text if override_text is not None else fmt(value, suffix=suffix)
+        display_text = f"{display_value}{note}"
 
         title_ax.text(
             right_x + 0.03,
@@ -2435,6 +2486,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
