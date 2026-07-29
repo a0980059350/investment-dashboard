@@ -44,13 +44,15 @@ ETFS = [
         'name': '00631L',
         'display': '正2',
         'ticker': '00631L.TW',
-        'ema': 32
+        'ema': 32,
+        'stop_days': 40
     },
     {
         'name': '00830',
         'display': '費半',
         'ticker': '00830.TW',
-        'ema': 42
+        'ema': 42,
+        'stop_days': 60
     }
 ]
 
@@ -1581,6 +1583,7 @@ def fetch_etf(ticker):
     return {
         'weekly': weekly_data.dropna().tail(53),
         'daily_adj': data['Close'],
+        'daily_low': data['Low'],
         'daily_raw': daily_raw_close,
         'live_price': live_price,
         'live_prev_close': live_prev_close
@@ -1928,7 +1931,7 @@ def plot_fund(ax, name, data, high_1y, fig):
     )
 
 
-def plot_etf(ax, name, etf_bundle, ema_period, fig):
+def plot_etf(ax, name, etf_bundle, ema_period, stop_days, fig):
     data = etf_bundle['weekly']
     x = np.arange(len(data))
 
@@ -1950,7 +1953,14 @@ def plot_etf(ax, name, etf_bundle, ema_period, fig):
 
     drawdown = latest / high - 1
 
-    stop = high * 0.8
+    # 停損價改用「前N個交易日的最低價」(還原日線Low),
+    # N依ETF不同(正2=40天、費半=60天,見ETFS設定的stop_days)。
+    stop = float(
+        etf_bundle['daily_low']
+        .rolling(stop_days)
+        .min()
+        .iloc[-1]
+    )
 
     if live_prev_close:
         change_pct = latest / live_prev_close - 1
@@ -2445,6 +2455,7 @@ def main():
                 etf['display'],
                 etf_data,
                 etf['ema'],
+                etf['stop_days'],
                 fig
             )
 
@@ -2494,6 +2505,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
