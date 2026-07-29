@@ -2068,8 +2068,8 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, fig):
             f'漲跌幅 {change_pct:+.2%}\n'
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
-            f'停損價 {stop:.2f}\n'
             f'回撤 {drawdown:.1%}\n'
+            f'{stop_days}天低點 {stop:.2f}\n'
             f'{multi_return_line}'
         ),
         transform=ax.transAxes,
