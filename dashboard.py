@@ -1463,53 +1463,64 @@ def fetch_market_overview(history):
     except Exception as error:
         print('大盤波動率計算失敗：', repr(error))
 
-    # ---- 櫃買指數（上櫃即時價格）----
+    # ---- 櫃買指數（上櫃即時價格，改用TPEx官方 tpex_index，不再依賴yfinance的^TWOII）----
+    otc_index_rows = None
     try:
-        otc_info = yf.Ticker('^TWOII').fast_info
-        result['otc_price'] = float(otc_info['last_price'])
-        result['otc_date'] = datetime.now(TZ).strftime('%Y%m%d')
+        otc_index_resp = requests.get(
+            'https://www.tpex.org.tw/openapi/v1/tpex_index',
+            headers={
+                'User-Agent': (
+                    'Mozilla/5.0 (Linux; Android 13) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/126.0 Mobile Safari/537.36'
+                )
+            },
+            timeout=30
+        )
+        otc_index_resp.raise_for_status()
+        otc_index_rows = otc_index_resp.json()
 
-        otc_prev_close = None
-        try:
-            otc_prev_close = float(otc_info['previous_close'])
-        except (KeyError, TypeError, ValueError):
-            print('[櫃買指數] fast_info沒有previous_close，改用歷史收盤價備援')
+        print('[櫃買指數] tpex_index 資料筆數：', len(otc_index_rows) if otc_index_rows else 0)
+        if otc_index_rows:
+            print('[櫃買指數] 最後一筆範例：', otc_index_rows[-1])
 
-        if not otc_prev_close:
-            # 備援：抓最近幾天的日K，用倒數第二個交易日收盤價當昨收
-            otc_recent = yf.download(
-                '^TWOII', period='5d', interval='1d',
-                auto_adjust=True, progress=False,
-                threads=False, timeout=30
-            )
-            if isinstance(otc_recent.columns, pd.MultiIndex):
-                otc_recent.columns = otc_recent.columns.get_level_values(0)
-            if len(otc_recent) >= 2:
-                otc_prev_close = float(otc_recent['Close'].iloc[-2])
+        if otc_index_rows:
+            latest_row = otc_index_rows[-1]
+            result['otc_price'] = float(str(latest_row.get('Close', '')).replace(',', ''))
+            result['otc_date'] = datetime.now(TZ).strftime('%Y%m%d')
 
-        if otc_prev_close:
-            result['otc_change_pct'] = result['otc_price'] / otc_prev_close - 1
-        else:
-            print('[櫃買指數] 備援也抓不到昨收，漲跌幅維持N/A')
+            try:
+                change_value = float(str(latest_row.get('Change', '')).replace(',', ''))
+                prev_close = result['otc_price'] - change_value
+                if prev_close:
+                    result['otc_change_pct'] = change_value / prev_close
+                else:
+                    raise ValueError('prev_close為0')
+            except (ValueError, TypeError, ZeroDivisionError):
+                if len(otc_index_rows) >= 2:
+                    prev_close = float(str(otc_index_rows[-2].get('Close', '')).replace(',', ''))
+                    if prev_close:
+                        result['otc_change_pct'] = result['otc_price'] / prev_close - 1
     except Exception as error:
         print('櫃買指數抓取失敗：', repr(error))
 
-    # ---- 上櫃波動率（20日年化歷史波動率，跟上市波動率同一套算法）----
+    # ---- 上櫃波動率（20日年化歷史波動率，改用TPEx官方 tpex_index 歷史收盤價）----
     try:
-        twoii_hist = yf.download(
-            '^TWOII', period='3mo', interval='1d',
-            auto_adjust=True, progress=False,
-            threads=False, timeout=30
-        )
-        if isinstance(twoii_hist.columns, pd.MultiIndex):
-            twoii_hist.columns = twoii_hist.columns.get_level_values(0)
+        if otc_index_rows:
+            otc_closes = []
+            for row in otc_index_rows:
+                try:
+                    otc_closes.append(float(str(row.get('Close', '')).replace(',', '')))
+                except (ValueError, TypeError):
+                    continue
 
-        twoii_ret = twoii_hist['Close'].pct_change().dropna()
+            otc_close_series = pd.Series(otc_closes)
+            otc_ret = otc_close_series.pct_change().dropna()
 
-        result['otc_market_vol'] = float(
-            twoii_ret.tail(20).std() * np.sqrt(252) * 100
-        )
-        result['otc_market_vol_date'] = twoii_hist.index[-1].strftime('%Y%m%d')
+            result['otc_market_vol'] = float(
+                otc_ret.tail(20).std() * np.sqrt(252) * 100
+            )
+            result['otc_market_vol_date'] = result['otc_date']
     except Exception as error:
         print('上櫃波動率計算失敗：', repr(error))
 
