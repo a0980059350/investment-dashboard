@@ -1584,6 +1584,7 @@ def fetch_etf(ticker):
         'weekly': weekly_data.dropna().tail(53),
         'daily_adj': data['Close'],
         'daily_low': data['Low'],
+        'daily_high': data['High'],
         'daily_raw': daily_raw_close,
         'live_price': live_price,
         'live_prev_close': live_prev_close
@@ -1953,14 +1954,9 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, fig):
 
     drawdown = latest / high - 1
 
-    # 停損價改用「前N個交易日的最低價」(還原日線Low),
-    # N依ETF不同(正2=40天、費半=60天,見ETFS設定的stop_days)。
-    stop = float(
-        etf_bundle['daily_low']
-        .rolling(stop_days)
-        .min()
-        .iloc[-1]
-    )
+    # 停損價 = 還原日線近一年(近252個交易日)最高價 × (1 - 20%)
+    high_1y = float(etf_bundle['daily_high'].tail(252).max())
+    stop = high_1y * 0.8
 
     if live_prev_close:
         change_pct = latest / live_prev_close - 1
@@ -2069,7 +2065,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, fig):
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
             f'回撤 {drawdown:.1%}\n'
-            f'{stop_days}天低點 {stop:.2f}\n'
+            f'20%停損價 {stop:.2f}\n'
             f'{multi_return_line}'
         ),
         transform=ax.transAxes,
@@ -2505,6 +2501,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
