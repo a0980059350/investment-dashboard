@@ -1664,6 +1664,22 @@ def fetch_market_overview(history):
         print('大盤估值指標抓取失敗：', repr(error))
 
     # ---- 上櫃本益比（市值加權：tpex_mainboard_peratio_analysis + tpex_mainboard_daily_close_quotes）----
+    def fetch_json_with_retry(url, headers, timeout=30, retries=3):
+        """
+        TPEx部分端點資料量較大，偶爾會在傳輸中途斷線
+        (ChunkedEncodingError/ProtocolError)，失敗時重試幾次再放棄。
+        """
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                resp = requests.get(url, headers=headers, timeout=timeout)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as error:
+                last_error = error
+                print(f'[重試] {url} 第{attempt}次失敗：', repr(error))
+        raise last_error
+
     try:
         otc_headers = {
             'User-Agent': (
@@ -1673,12 +1689,10 @@ def fetch_market_overview(history):
             )
         }
 
-        otc_pe_resp = requests.get(
+        otc_pe_rows = fetch_json_with_retry(
             'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis',
-            headers=otc_headers, timeout=30
+            otc_headers
         )
-        otc_pe_resp.raise_for_status()
-        otc_pe_rows = otc_pe_resp.json()
 
         print('[上櫃本益比] openapi peratio_analysis 資料筆數：', len(otc_pe_rows))
 
@@ -1694,12 +1708,10 @@ def fetch_market_overview(history):
                 continue
 
         if otc_pe_by_code:
-            otc_close_resp = requests.get(
+            otc_close_rows = fetch_json_with_retry(
                 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes',
-                headers=otc_headers, timeout=30
+                otc_headers
             )
-            otc_close_resp.raise_for_status()
-            otc_close_rows = otc_close_resp.json()
 
             otc_valuation_date = otc_close_rows[0].get('Date') if otc_close_rows else None
 
