@@ -880,6 +880,107 @@ def fetch_market_margin_ratio():
     return margin_value / total_margin_amount * 100, matched_date
 
 
+def fetch_otc_margin_ratio():
+    """
+    上櫃(TPEx)大盤融資維持率，算法跟fetch_market_margin_ratio()一樣：
+    Σ(個股融資今日餘額(股) × 收盤價) / 上櫃融資金額今日餘額(元)
+
+    TPEx目前openapi文件版本可能會變動，這裡先用最可能的端點嘗試，
+    抓不到就印出實際回傳內容/欄位，方便照著校正。
+    """
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Linux; Android 13) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/126.0 Mobile Safari/537.36'
+        )
+    }
+
+    # ---- 分子：上櫃個股融資今日餘額 × 收盤價 ----
+    try:
+        margin_resp = requests.get(
+            'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_trading_status',
+            headers=headers,
+            timeout=30
+        )
+        margin_resp.raise_for_status()
+        margin_rows = margin_resp.json()
+
+        print('[上櫃融資維持率] API資料筆數：', len(margin_rows) if margin_rows else 0)
+        if margin_rows:
+            print('[上櫃融資維持率] 第一筆範例：', margin_rows[0])
+
+        margin_shares = {}
+        close_prices = {}
+        for row in margin_rows:
+            try:
+                code = str(row.get('SecuritiesCompanyCode') or row.get('Code') or '').strip()
+                shares_raw = row.get('MarginPurchaseTodayBalance') or row.get('TodayBalance')
+                close_raw = row.get('Close') or row.get('ClosingPrice')
+                if shares_raw is None or close_raw is None:
+                    continue
+                shares = float(str(shares_raw).replace(',', '')) * 1000
+                close = float(str(close_raw).replace(',', ''))
+                if shares > 0:
+                    margin_shares[code] = shares
+                    close_prices[code] = close
+            except (ValueError, TypeError):
+                continue
+
+        print('[上櫃融資維持率] 有效融資個股數：', len(margin_shares))
+
+        if not margin_shares:
+            print('[上櫃融資維持率] 抓不到個股資料，實際欄位：',
+                  list(margin_rows[0].keys()) if margin_rows else '（空）')
+            return None, None
+
+        margin_value = sum(
+            shares * close_prices[code]
+            for code, shares in margin_shares.items()
+            if code in close_prices
+        )
+
+        if margin_value <= 0:
+            return None, None
+
+    except Exception as error:
+        print('[上櫃融資維持率] 分子抓取失敗：', repr(error))
+        return None, None
+
+    # ---- 分母：上櫃融資金額今日餘額彙總 ----
+    try:
+        summary_resp = requests.get(
+            'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_trading_summary',
+            headers=headers,
+            timeout=30
+        )
+        summary_resp.raise_for_status()
+        summary_data = summary_resp.json()
+
+        print('[上櫃融資維持率] 彙總API回傳：', summary_data)
+
+        row = summary_data[0] if isinstance(summary_data, list) else summary_data
+        amount_raw = row.get('MarginPurchaseTodayBalanceAmount') or row.get('MarginBalanceAmount')
+        query_date = row.get('Date') or row.get('date')
+
+        if amount_raw is None:
+            print('[上櫃融資維持率] 彙總欄位對不上，實際欄位：', list(row.keys()))
+            return None, None
+
+        total_margin_amount = float(str(amount_raw).replace(',', '')) * 1000
+
+    except Exception as error:
+        print('[上櫃融資維持率] 分母抓取失敗：', repr(error))
+        return None, None
+
+    if total_margin_amount <= 0:
+        return None, None
+
+    print(f'[上櫃融資維持率] margin_value={margin_value}, total_margin_amount={total_margin_amount}')
+
+    return margin_value / total_margin_amount * 100, query_date
+
+
 def update_market_metric_history(history, key, value):
     """
     通用版：把每次算出來的大盤指標(本益比、股淨比等)累積進歷史紀錄，
@@ -1237,6 +1338,8 @@ def fetch_market_overview(history):
         'market_vol_date': None,
         'margin_ratio': None,
         'margin_ratio_date': None,
+        'margin_ratio_otc': None,
+        'margin_ratio_otc_date': None,
         'revenue_yoy': None,
         'revenue_period': None,
         'foreign_net_sell': None,
@@ -1430,13 +1533,21 @@ def fetch_market_overview(history):
     result['market_pb_sample'] = pb_sample
     print(f'[大盤股淨比] 近5年統計：平均={pb_mean}, 標準差={pb_std}, 樣本數={pb_sample}')
 
-    # ---- 大盤融資維持率 ----
+    # ---- 大盤融資維持率(上市) ----
     try:
         margin_ratio, margin_ratio_date = fetch_market_margin_ratio()
         result['margin_ratio'] = margin_ratio
         result['margin_ratio_date'] = margin_ratio_date
     except Exception as error:
-        print('大盤融資維持率整體流程失敗：', repr(error))
+        print('上市融資維持率整體流程失敗：', repr(error))
+
+    # ---- 大盤融資維持率(上櫃) ----
+    try:
+        margin_ratio_otc, margin_ratio_otc_date = fetch_otc_margin_ratio()
+        result['margin_ratio_otc'] = margin_ratio_otc
+        result['margin_ratio_otc_date'] = margin_ratio_otc_date
+    except Exception as error:
+        print('上櫃融資維持率整體流程失敗：', repr(error))
 
     # ---- 上市公司當月營收年增率 ----
     try:
@@ -2339,9 +2450,20 @@ def main():
             foreign_net_display, foreign_net
         ),
         (
-            '維持率', market['margin_ratio'], '%', 'margin',
-            format_date_suffix(market.get('margin_ratio_date')),
-            None, None
+            '維持率',
+            market['margin_ratio'],
+            '%',
+            'margin',
+            '',
+            (
+                f"上市{fmt(market['margin_ratio'], suffix='%')}"
+                f"{format_date_suffix(market.get('margin_ratio_date'))} "
+                f"上櫃{fmt(market.get('margin_ratio_otc'), suffix='%')}"
+                f"{format_date_suffix(market.get('margin_ratio_otc_date'))}"
+            ),
+            min(v for v in [market.get('margin_ratio'), market.get('margin_ratio_otc')] if v is not None)
+                if (market.get('margin_ratio') is not None or market.get('margin_ratio_otc') is not None)
+                else None
         ),
         (
             '波動率', market['market_vol'], '%', 'vol',
