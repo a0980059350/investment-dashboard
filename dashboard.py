@@ -23,6 +23,7 @@ from matplotlib.transforms import IdentityTransform
 TZ = ZoneInfo('Asia/Taipei')
 OUTPUT = 'wallpaper.png'
 HISTORY_FILE = 'history.json'
+MARKET_PE_CSV = 'market_pe_history.csv'
 
 
 FUNDS = [
@@ -346,6 +347,79 @@ def save_history(history):
             json.dump(history, file, ensure_ascii=False)
     except Exception as error:
         print('寫入歷史紀錄失敗：', repr(error))
+
+
+def load_market_pe_csv():
+    """
+    讀取大盤本益比的完整每日歷史紀錄(CSV，欄位：date, pe)。
+    這份檔案用「全部歷史」(不像history.json裡的舊邏輯只保留近5~6年)，
+    平均值/標準差/百分位都是用這份CSV的全部資料算出來的。
+    找不到檔案就回傳空的DataFrame，之後會自然從頭開始累積。
+    """
+    if not os.path.exists(MARKET_PE_CSV):
+        return pd.DataFrame(columns=['date', 'pe'])
+
+    try:
+        df = pd.read_csv(MARKET_PE_CSV, dtype={'date': str})
+        df['pe'] = pd.to_numeric(df['pe'], errors='coerce')
+        df = df.dropna(subset=['pe'])
+        df = df.drop_duplicates(subset='date', keep='last')
+        df = df.sort_values('date').reset_index(drop=True)
+        return df
+    except Exception as error:
+        print('讀取market_pe_history.csv失敗，改用空白重新累積：', repr(error))
+        return pd.DataFrame(columns=['date', 'pe'])
+
+
+def save_market_pe_csv(df):
+    try:
+        df.sort_values('date').to_csv(MARKET_PE_CSV, index=False)
+    except Exception as error:
+        print('寫入market_pe_history.csv失敗：', repr(error))
+
+
+def append_or_update_market_pe(date_str, pe_value):
+    """
+    今天已存在就更新，不存在就新增一筆，不會重複。
+    回傳更新後的完整DataFrame。
+    """
+    df = load_market_pe_csv()
+
+    if pe_value is None:
+        return df
+
+    if (df['date'] == date_str).any():
+        df.loc[df['date'] == date_str, 'pe'] = pe_value
+    else:
+        df = pd.concat(
+            [df, pd.DataFrame([{'date': date_str, 'pe': pe_value}])],
+            ignore_index=True
+        )
+
+    df = df.drop_duplicates(subset='date', keep='last').sort_values('date').reset_index(drop=True)
+    save_market_pe_csv(df)
+    return df
+
+
+def compute_market_pe_stats(df, today_pe):
+    """
+    用CSV裡的「全部歷史資料」算：
+    - mean, std（方法一的紅綠燈門檻用）
+    - z-score（今日PE距離平均值幾個標準差）
+    - percentile（今日PE在全部歷史資料中的百分位排名，0~100）
+    樣本數太少(<30筆)時，統計量不具參考性，回傳None。
+    """
+    if today_pe is None or df.empty or len(df) < 30:
+        return None, None, None, None, len(df) if not df.empty else 0
+
+    values = df['pe'].to_numpy()
+    mean = float(values.mean())
+    std = float(values.std())
+
+    z_score = (today_pe - mean) / std if std > 0 else None
+    percentile = float((values <= today_pe).mean() * 100)
+
+    return mean, std, z_score, percentile, len(df)
 
 
 def update_history_and_get_high(history, fund_name, data):
@@ -1345,7 +1419,14 @@ def fetch_market_overview(history):
         'foreign_net_sell': None,
         'foreign_net_sell_date': None,
         'foreign_futures_net_oi': None,
-        'foreign_futures_net_oi_date': None
+        'foreign_futures_net_oi_date': None,
+        'otc_price': None,
+        'otc_change_pct': None,
+        'otc_date': None,
+        'otc_market_pe': None,
+        'otc_market_pe_date': None,
+        'otc_market_vol': None,
+        'otc_market_vol_date': None
     }
 
     # ---- 加權指數 ----
@@ -1381,6 +1462,36 @@ def fetch_market_overview(history):
         result['market_vol_date'] = twii_hist.index[-1].strftime('%Y%m%d')
     except Exception as error:
         print('大盤波動率計算失敗：', repr(error))
+
+    # ---- 櫃買指數（上櫃即時價格）----
+    try:
+        otc_info = yf.Ticker('^TWOII').fast_info
+        result['otc_price'] = float(otc_info['last_price'])
+        otc_prev_close = float(otc_info['previous_close'])
+        result['otc_date'] = datetime.now(TZ).strftime('%Y%m%d')
+        if otc_prev_close:
+            result['otc_change_pct'] = result['otc_price'] / otc_prev_close - 1
+    except Exception as error:
+        print('櫃買指數抓取失敗：', repr(error))
+
+    # ---- 上櫃波動率（20日年化歷史波動率，跟上市波動率同一套算法）----
+    try:
+        twoii_hist = yf.download(
+            '^TWOII', period='3mo', interval='1d',
+            auto_adjust=True, progress=False,
+            threads=False, timeout=30
+        )
+        if isinstance(twoii_hist.columns, pd.MultiIndex):
+            twoii_hist.columns = twoii_hist.columns.get_level_values(0)
+
+        twoii_ret = twoii_hist['Close'].pct_change().dropna()
+
+        result['otc_market_vol'] = float(
+            twoii_ret.tail(20).std() * np.sqrt(252) * 100
+        )
+        result['otc_market_vol_date'] = twoii_hist.index[-1].strftime('%Y%m%d')
+    except Exception as error:
+        print('上櫃波動率計算失敗：', repr(error))
 
     # ---- 大盤本益比／股價淨值比／殖利率（改用市值加權：已發行股數 × 收盤價 當權重，接近官方算法）----
     try:
@@ -1521,11 +1632,124 @@ def fetch_market_overview(history):
     except Exception as error:
         print('大盤估值指標抓取失敗：', repr(error))
 
-    pe_mean, pe_std, pe_sample = update_market_pe_history(history, result['market_pe'])
+    # ---- 上櫃本益比（市值加權：tpex_mainboard_peratio_analysis + tpex_mainboard_daily_close_quotes）----
+    try:
+        otc_headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Linux; Android 13) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/126.0 Mobile Safari/537.36'
+            )
+        }
+
+        otc_pe_resp = requests.get(
+            'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis',
+            headers=otc_headers, timeout=30
+        )
+        otc_pe_resp.raise_for_status()
+        otc_pe_rows = otc_pe_resp.json()
+
+        print('[上櫃本益比] openapi peratio_analysis 資料筆數：', len(otc_pe_rows))
+
+        otc_pe_by_code = {}
+        for row in otc_pe_rows:
+            try:
+                code = str(row.get('SecuritiesCompanyCode', '')).strip()
+                pe = float(str(row.get('PriceEarningRatio', '')).replace(',', ''))
+                # 排除異常極端值，跟上市本益比同樣用100倍當門檻濾除
+                if 0 < pe <= 100:
+                    otc_pe_by_code[code] = pe
+            except (ValueError, TypeError):
+                continue
+
+        if otc_pe_by_code:
+            otc_close_resp = requests.get(
+                'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes',
+                headers=otc_headers, timeout=30
+            )
+            otc_close_resp.raise_for_status()
+            otc_close_rows = otc_close_resp.json()
+
+            otc_valuation_date = otc_close_rows[0].get('Date') if otc_close_rows else None
+
+            print('[上櫃本益比] openapi daily_close_quotes 資料筆數：', len(otc_close_rows))
+            print('[上櫃本益比] otc_pe_by_code 樣本數：', len(otc_pe_by_code))
+
+            otc_pe_total_market_cap = otc_pe_total_earnings = 0.0
+            otc_matched = 0
+
+            for row in otc_close_rows:
+                try:
+                    code = str(row.get('SecuritiesCompanyCode', '')).strip()
+                    if code not in otc_pe_by_code:
+                        continue
+
+                    close = float(str(row.get('Close', '')).replace(',', ''))
+                    # Capitals(發行股數)單位未確認，先假設是實際股數；
+                    # 如果算出來的本益比數字明顯離譜，代表可能要*1000，屆時再校正。
+                    shares = float(str(row.get('Capitals', '')).replace(',', ''))
+                    if close <= 0 or shares <= 0:
+                        continue
+
+                    otc_matched += 1
+                    market_cap = shares * close
+                    earnings = market_cap / otc_pe_by_code[code]
+                    otc_pe_total_market_cap += market_cap
+                    otc_pe_total_earnings += earnings
+                except (ValueError, TypeError, ZeroDivisionError):
+                    continue
+
+            print('[上櫃本益比] close與PE配對成功家數：', otc_matched)
+            print(
+                '[上櫃本益比] otc_pe_total_market_cap：', otc_pe_total_market_cap,
+                ' otc_pe_total_earnings：', otc_pe_total_earnings
+            )
+
+            if otc_pe_total_earnings > 0:
+                result['otc_market_pe'] = otc_pe_total_market_cap / otc_pe_total_earnings
+                result['otc_market_pe_date'] = otc_valuation_date
+                print('[上櫃本益比] 本益比(總市值/總獲利)結果：', result['otc_market_pe'])
+    except Exception as error:
+        print('上櫃本益比抓取失敗：', repr(error))
+
+    # ---- 大盤本益比歷史統計：改用 market_pe_history.csv（全部歷史，不再只留5~6年）----
+    pe_date_raw = result.get('market_pe_date')
+    pe_date_key = None
+    if pe_date_raw:
+        digits = str(pe_date_raw).strip()
+        if len(digits) == 7:
+            roc_year = int(digits[:3])
+            pe_date_key = f'{roc_year + 1911}{digits[3:]}'
+        else:
+            pe_date_key = digits
+
+    if pe_date_key and result['market_pe'] is not None:
+        pe_history_df = append_or_update_market_pe(pe_date_key, result['market_pe'])
+    else:
+        pe_history_df = load_market_pe_csv()
+
+    pe_mean, pe_std, pe_zscore, pe_percentile, pe_sample = compute_market_pe_stats(
+        pe_history_df, result['market_pe']
+    )
     result['market_pe_mean'] = pe_mean
     result['market_pe_std'] = pe_std
+    result['market_pe_zscore'] = pe_zscore
+    result['market_pe_percentile'] = pe_percentile
     result['market_pe_sample'] = pe_sample
-    print(f'[大盤本益比] 近5年統計：平均={pe_mean}, 標準差={pe_std}, 樣本數={pe_sample}')
+
+    print(
+        f"[大盤本益比] PE：{result['market_pe']}  "
+        f"平均：{pe_mean}  Std：{pe_std}  "
+        f"Z-score：{pe_zscore}  Percentile：{pe_percentile}  樣本數：{pe_sample}"
+    )
+
+    otc_pe_mean, otc_pe_std, otc_pe_sample = update_market_metric_history(
+        history, '上櫃本益比', result['otc_market_pe']
+    )
+    result['otc_market_pe_mean'] = otc_pe_mean
+    result['otc_market_pe_std'] = otc_pe_std
+    result['otc_market_pe_sample'] = otc_pe_sample
+    print(f'[上櫃本益比] 近5年統計：平均={otc_pe_mean}, 標準差={otc_pe_std}, 樣本數={otc_pe_sample}')
 
     pb_mean, pb_std, pb_sample = update_market_pb_history(history, result.get('market_pb'))
     result['market_pb_mean'] = pb_mean
@@ -1541,13 +1765,7 @@ def fetch_market_overview(history):
     except Exception as error:
         print('上市融資維持率整體流程失敗：', repr(error))
 
-    # ---- 大盤融資維持率(上櫃) ----
-    try:
-        margin_ratio_otc, margin_ratio_otc_date = fetch_otc_margin_ratio()
-        result['margin_ratio_otc'] = margin_ratio_otc
-        result['margin_ratio_otc_date'] = margin_ratio_otc_date
-    except Exception as error:
-        print('上櫃融資維持率整體流程失敗：', repr(error))
+    # ---- 上櫃融資維持率：TPEx未公開市場加總的融資金額資料，無法計算，固定顯示「資料源缺失」----
 
     # ---- 上市公司當月營收年增率 ----
     try:
@@ -2014,7 +2232,7 @@ def plot_fund(ax, name, data, high_1y, fig):
             f'漲跌幅 {change_pct:+.2%}\n'
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
-            f'加碼價 {add_price:.2f}\n'
+            f'8折價 {add_price:.2f}\n'
             f'回撤 {drawdown:.1%}\n'
             f'{multi_return_line}'
         ),
@@ -2248,7 +2466,7 @@ def main():
     grid = fig.add_gridspec(
         3,
         2,
-        height_ratios=[1.9, 4.2, 4.2],
+        height_ratios=[2.6, 3.85, 3.85],
         hspace=0.04,
         wspace=0.06,
         left=0.03,
@@ -2281,9 +2499,9 @@ def main():
                 return 'green'
             return 'yellow'
         if kind == 'margin':
-            if value < 130:
+            if value < 140:
                 return 'red'
-            if value <= 150:
+            if value <= 170:
                 return 'yellow'
             return 'green'
         if kind == 'vol':
@@ -2336,19 +2554,7 @@ def main():
         except (ValueError, IndexError):
             revenue_note = f"（{raw_period}）"
 
-    foreign_net = market.get('foreign_net_sell')
-    if foreign_net is not None:
-        foreign_net_display = f"{foreign_net / 1e8:+.1f}億"
-    else:
-        foreign_net_display = 'N/A'
-
-    net_oi = market.get('foreign_futures_net_oi')
-    if net_oi is not None:
-        net_oi_display = f"{net_oi:+,.0f}口"
-    else:
-        net_oi_display = 'N/A'
-
-    # ---- 左欄：加權 / 漲跌幅 / 本益比 / 股淨比 / YoY ----
+    # ---- 左欄：加權 / 漲跌幅 / 上市本益比 / 上市波動率 / 上市維持率 / 上市YoY ----
     left_x = 0.03
 
     taiex_date_note = format_date_suffix(market.get('taiex_date'))
@@ -2381,19 +2587,23 @@ def main():
         alpha=0.95
     )
 
+    pe_percentile = market.get('market_pe_percentile')
+    pe_note = format_date_suffix(market.get('market_pe_date'))
+    if pe_percentile is not None:
+        pe_note = f"{pe_note}（{pe_percentile:.0f}%）"
+
     left_metric_rows = [
-        ('本益比', market['market_pe'], '', 'pe', format_date_suffix(market.get('market_pe_date'))),
-        ('股淨比', market.get('market_pb'), '', 'pb', format_date_suffix(market.get('market_pb_date'))),
-        ('YoY', market['revenue_yoy'], '%', 'revenue_yoy', revenue_note),
+        ('上市本益比', market['market_pe'], '', 'pe', pe_note),
+        ('上市波動率', market['market_vol'], '%', 'vol', format_date_suffix(market.get('market_vol_date'))),
+        ('上市維持率', market['margin_ratio'], '%', 'margin', format_date_suffix(market.get('margin_ratio_date'))),
+        ('上市YoY', market['revenue_yoy'], '%', 'revenue_yoy', revenue_note),
     ]
-    left_row_ys = [0.50, 0.30, 0.10]
+    left_row_ys = [0.58, 0.41, 0.24, 0.07]
 
     for (label, value, suffix, kind, note), y in zip(left_metric_rows, left_row_ys):
         if value is not None:
             if kind == 'pe':
                 stat_mean, stat_std = market.get('market_pe_mean'), market.get('market_pe_std')
-            elif kind == 'pb':
-                stat_mean, stat_std = market.get('market_pb_mean'), market.get('market_pb_std')
             else:
                 stat_mean, stat_std = None, None
 
@@ -2414,28 +2624,32 @@ def main():
             alpha=0.95
         )
 
-    # ---- 右欄：日期 / 外資未平倉期貨空單 / 外資賣超 / 維持率 / 波動率 ----
+    # ---- 右欄：櫃買 / 漲跌幅 / 上櫃本益比 / 上櫃波動率 / 日期 ----
     right_x = 0.66
+
+    otc_date_note = format_date_suffix(market.get('otc_date'))
 
     title_ax.text(
         right_x,
         0.92,
-        (
-            '日期：'
-            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
-        ),
-        fontsize=18,
+        f"櫃買 {fmt(market.get('otc_price'), digits=2)}{otc_date_note}",
+        fontsize=26,
+        fontweight='bold',
         ha='left',
         va='top',
-        color=TEXT_DIM,
-        alpha=0.85
+        color=GOLD,
+        alpha=0.95
     )
 
-    # 外資期貨空單沒有指定燈號規則，只顯示數字不畫燈
+    if market.get('otc_change_pct') is not None:
+        otc_change_text = f"{market['otc_change_pct']*100:+.2f}%"
+    else:
+        otc_change_text = 'N/A'
+
     title_ax.text(
         right_x,
         0.72,
-        f"外資未平倉 {net_oi_display}{format_date_suffix(market.get('foreign_futures_net_oi_date'))}",
+        f"漲跌幅 {otc_change_text}{otc_date_note}",
         fontsize=20,
         ha='left',
         va='center',
@@ -2444,52 +2658,48 @@ def main():
     )
 
     right_metric_rows = [
-        (
-            '外資賣超', None, '', 'foreign_sell',
-            format_date_suffix(market.get('foreign_net_sell_date')),
-            foreign_net_display, foreign_net
-        ),
-        (
-            '上市維持率', market['margin_ratio'], '%', 'margin',
-            format_date_suffix(market.get('margin_ratio_date')),
-            None, None
-        ),
-        (
-            '上櫃維持率', market.get('margin_ratio_otc'), '%', 'margin',
-            format_date_suffix(market.get('margin_ratio_otc_date')),
-            None, None
-        ),
-        (
-            '波動率', market['market_vol'], '%', 'vol',
-            format_date_suffix(market.get('market_vol_date')),
-            None, None
-        ),
+        ('上櫃本益比', market.get('otc_market_pe'), '', 'pe', format_date_suffix(market.get('otc_market_pe_date'))),
+        ('上櫃波動率', market.get('otc_market_vol'), '%', 'vol', format_date_suffix(market.get('otc_market_vol_date'))),
     ]
-    right_row_ys = [0.50, 0.36, 0.22, 0.08]
+    right_row_ys = [0.50, 0.30]
 
-    for (label, value, suffix, kind, note, override_text, light_override), y in zip(right_metric_rows, right_row_ys):
-        light_value = light_override if light_override is not None else value
+    for (label, value, suffix, kind, note), y in zip(right_metric_rows, right_row_ys):
+        if value is not None:
+            if kind == 'pe':
+                stat_mean, stat_std = market.get('otc_market_pe_mean'), market.get('otc_market_pe_std')
+            else:
+                stat_mean, stat_std = None, None
 
-        if light_value is not None:
             draw_signal_light(
                 fig, title_ax,
-                metric_state(kind, light_value),
+                metric_state(kind, value, mean=stat_mean, std=stat_std),
                 x=right_x, y=y, r_px=12
             )
-
-        display_value = override_text if override_text is not None else fmt(value, suffix=suffix)
-        display_text = f"{display_value}{note}"
 
         title_ax.text(
             right_x + 0.03,
             y,
-            f"{label} {display_text}",
+            f"{label} {fmt(value, suffix=suffix)}{note}",
             fontsize=20,
             ha='left',
             va='center',
             color=TEXT_DIM,
             alpha=0.95
         )
+
+    title_ax.text(
+        right_x,
+        0.10,
+        (
+            '日期：'
+            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
+        ),
+        fontsize=18,
+        ha='left',
+        va='center',
+        color=TEXT_DIM,
+        alpha=0.85
+    )
 
     fund_axes = [
         fig.add_subplot(grid[1, 0]),
