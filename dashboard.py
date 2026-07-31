@@ -1426,7 +1426,9 @@ def fetch_market_overview(history):
         'otc_market_pe': None,
         'otc_market_pe_date': None,
         'otc_market_vol': None,
-        'otc_market_vol_date': None
+        'otc_market_vol_date': None,
+        'taiex_drawdown': None,
+        'otc_drawdown': None
     }
 
     # ---- 加權指數 ----
@@ -1462,6 +1464,23 @@ def fetch_market_overview(history):
         result['market_vol_date'] = twii_hist.index[-1].strftime('%Y%m%d')
     except Exception as error:
         print('大盤波動率計算失敗：', repr(error))
+
+    # ---- 加權指數回撤（近一年高點）----
+    try:
+        twii_1y = yf.download(
+            '^TWII', period='1y', interval='1d',
+            auto_adjust=True, progress=False,
+            threads=False, timeout=30
+        )
+        if isinstance(twii_1y.columns, pd.MultiIndex):
+            twii_1y.columns = twii_1y.columns.get_level_values(0)
+
+        taiex_high_1y = float(twii_1y['Close'].tail(252).max())
+        if result.get('taiex_price') and taiex_high_1y:
+            result['taiex_drawdown'] = result['taiex_price'] / taiex_high_1y - 1
+            print(f'[加權回撤] 近一年高點={taiex_high_1y}，回撤={result["taiex_drawdown"]}')
+    except Exception as error:
+        print('加權回撤計算失敗：', repr(error))
 
     # ---- 櫃買指數（上櫃即時價格，改用TPEx官方 tpex_index，不再依賴yfinance的^TWOII）----
     otc_index_rows = None
@@ -1523,6 +1542,40 @@ def fetch_market_overview(history):
             result['otc_market_vol_date'] = result['otc_date']
     except Exception as error:
         print('上櫃波動率計算失敗：', repr(error))
+
+    # ---- 櫃買指數回撤（近一年高點；優先用yfinance拉一年資料，失敗則退回tpex_index現有天數）----
+    try:
+        otc_high_1y = None
+        try:
+            twoii_1y = yf.download(
+                '^TWOII', period='1y', interval='1d',
+                auto_adjust=True, progress=False,
+                threads=False, timeout=30
+            )
+            if isinstance(twoii_1y.columns, pd.MultiIndex):
+                twoii_1y.columns = twoii_1y.columns.get_level_values(0)
+            if len(twoii_1y) > 0:
+                otc_high_1y = float(twoii_1y['Close'].tail(252).max())
+        except Exception as error:
+            print('[櫃買回撤] yfinance抓一年資料失敗，改用tpex_index現有天數：', repr(error))
+
+        if otc_high_1y is None and otc_index_rows:
+            # 備援：tpex_index目前只回傳約一個月資料，並非真正的近一年高點，先用現有範圍內的最高值頂著
+            fallback_closes = []
+            for row in otc_index_rows:
+                try:
+                    fallback_closes.append(float(str(row.get('Close', '')).replace(',', '')))
+                except (ValueError, TypeError):
+                    continue
+            if fallback_closes:
+                otc_high_1y = max(fallback_closes)
+                print('[櫃買回撤] 備援資料僅涵蓋', len(fallback_closes), '筆，非真正近一年高點，僅供暫時參考')
+
+        if otc_high_1y and result.get('otc_price'):
+            result['otc_drawdown'] = result['otc_price'] / otc_high_1y - 1
+            print(f'[櫃買回撤] 高點={otc_high_1y}，回撤={result["otc_drawdown"]}')
+    except Exception as error:
+        print('櫃買回撤計算失敗：', repr(error))
 
     # ---- 大盤本益比／股價淨值比／殖利率（改用市值加權：已發行股數 × 收盤價 當權重，接近官方算法）----
     try:
@@ -2630,6 +2683,22 @@ def main():
         alpha=0.95
     )
 
+    if market.get('taiex_drawdown') is not None:
+        taiex_drawdown_text = f"{market['taiex_drawdown']*100:+.1f}%"
+    else:
+        taiex_drawdown_text = 'N/A'
+
+    title_ax.text(
+        left_x,
+        0.63,
+        f"回撤 {taiex_drawdown_text}",
+        fontsize=18,
+        ha='left',
+        va='center',
+        color=TEXT_DIM,
+        alpha=0.85
+    )
+
     pe_percentile = market.get('market_pe_percentile')
     pe_note = format_date_suffix(market.get('market_pe_date'))
     if pe_percentile is not None:
@@ -2641,7 +2710,7 @@ def main():
         ('上市維持率', market['margin_ratio'], '%', 'margin', format_date_suffix(market.get('margin_ratio_date'))),
         ('上市YoY', market['revenue_yoy'], '%', 'revenue_yoy', revenue_note),
     ]
-    left_row_ys = [0.58, 0.41, 0.24, 0.07]
+    left_row_ys = [0.51, 0.36, 0.21, 0.06]
 
     for (label, value, suffix, kind, note), y in zip(left_metric_rows, left_row_ys):
         if value is not None:
@@ -2700,11 +2769,27 @@ def main():
         alpha=0.95
     )
 
+    if market.get('otc_drawdown') is not None:
+        otc_drawdown_text = f"{market['otc_drawdown']*100:+.1f}%"
+    else:
+        otc_drawdown_text = 'N/A'
+
+    title_ax.text(
+        right_x,
+        0.63,
+        f"回撤 {otc_drawdown_text}",
+        fontsize=18,
+        ha='left',
+        va='center',
+        color=TEXT_DIM,
+        alpha=0.85
+    )
+
     right_metric_rows = [
         ('上櫃本益比', market.get('otc_market_pe'), '', 'pe', format_date_suffix(market.get('otc_market_pe_date'))),
         ('上櫃波動率', market.get('otc_market_vol'), '%', 'vol', format_date_suffix(market.get('otc_market_vol_date'))),
     ]
-    right_row_ys = [0.50, 0.30]
+    right_row_ys = [0.48, 0.33]
 
     for (label, value, suffix, kind, note), y in zip(right_metric_rows, right_row_ys):
         if value is not None:
