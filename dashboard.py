@@ -2450,20 +2450,14 @@ def main():
             foreign_net_display, foreign_net
         ),
         (
-            '維持率',
-            market['margin_ratio'],
-            '%',
-            'margin',
-            '',
-            (
-                f"上市{fmt(market['margin_ratio'], suffix='%')}"
-                f"{format_date_suffix(market.get('margin_ratio_date'))} "
-                f"上櫃{fmt(market.get('margin_ratio_otc'), suffix='%')}"
-                f"{format_date_suffix(market.get('margin_ratio_otc_date'))}"
-            ),
-            min(v for v in [market.get('margin_ratio'), market.get('margin_ratio_otc')] if v is not None)
-                if (market.get('margin_ratio') is not None or market.get('margin_ratio_otc') is not None)
-                else None
+            '上市維持率', market['margin_ratio'], '%', 'margin',
+            format_date_suffix(market.get('margin_ratio_date')),
+            None, None
+        ),
+        (
+            '上櫃維持率', market.get('margin_ratio_otc'), '%', 'margin',
+            format_date_suffix(market.get('margin_ratio_otc_date')),
+            None, None
         ),
         (
             '波動率', market['market_vol'], '%', 'vol',
@@ -2471,7 +2465,7 @@ def main():
             None, None
         ),
     ]
-    right_row_ys = [0.50, 0.30, 0.10]
+    right_row_ys = [0.50, 0.36, 0.22, 0.08]
 
     for (label, value, suffix, kind, note, override_text, light_override), y in zip(right_metric_rows, right_row_ys):
         light_value = light_override if light_override is not None else value
