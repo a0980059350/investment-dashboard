@@ -1467,10 +1467,30 @@ def fetch_market_overview(history):
     try:
         otc_info = yf.Ticker('^TWOII').fast_info
         result['otc_price'] = float(otc_info['last_price'])
-        otc_prev_close = float(otc_info['previous_close'])
         result['otc_date'] = datetime.now(TZ).strftime('%Y%m%d')
+
+        otc_prev_close = None
+        try:
+            otc_prev_close = float(otc_info['previous_close'])
+        except (KeyError, TypeError, ValueError):
+            print('[櫃買指數] fast_info沒有previous_close，改用歷史收盤價備援')
+
+        if not otc_prev_close:
+            # 備援：抓最近幾天的日K，用倒數第二個交易日收盤價當昨收
+            otc_recent = yf.download(
+                '^TWOII', period='5d', interval='1d',
+                auto_adjust=True, progress=False,
+                threads=False, timeout=30
+            )
+            if isinstance(otc_recent.columns, pd.MultiIndex):
+                otc_recent.columns = otc_recent.columns.get_level_values(0)
+            if len(otc_recent) >= 2:
+                otc_prev_close = float(otc_recent['Close'].iloc[-2])
+
         if otc_prev_close:
             result['otc_change_pct'] = result['otc_price'] / otc_prev_close - 1
+        else:
+            print('[櫃買指數] 備援也抓不到昨收，漲跌幅維持N/A')
     except Exception as error:
         print('櫃買指數抓取失敗：', repr(error))
 
