@@ -1520,8 +1520,29 @@ def fetch_market_overview(history):
                     prev_close = float(str(otc_index_rows[-2].get('Close', '')).replace(',', ''))
                     if prev_close:
                         result['otc_change_pct'] = result['otc_price'] / prev_close - 1
+
+            # 抓到新資料就存進history快取，供非交易日(空清單)時沿用
+            history['櫃買指數快取'] = {
+                'otc_price': result['otc_price'],
+                'otc_change_pct': result.get('otc_change_pct'),
+                'otc_date': result['otc_date']
+            }
+        else:
+            # 非交易日等狀況，tpex_index會回傳空清單，沿用上一次抓到的快取值
+            cached = history.get('櫃買指數快取')
+            if cached:
+                result['otc_price'] = cached.get('otc_price')
+                result['otc_change_pct'] = cached.get('otc_change_pct')
+                result['otc_date'] = cached.get('otc_date')
+                print('[櫃買指數] 今日無資料(非交易日？)，沿用快取：', cached)
     except Exception as error:
         print('櫃買指數抓取失敗：', repr(error))
+        cached = history.get('櫃買指數快取')
+        if cached:
+            result['otc_price'] = cached.get('otc_price')
+            result['otc_change_pct'] = cached.get('otc_change_pct')
+            result['otc_date'] = cached.get('otc_date')
+            print('[櫃買指數] 抓取失敗，沿用快取：', cached)
 
     # ---- 上櫃波動率（20日年化歷史波動率，改用TPEx官方 tpex_index 歷史收盤價）----
     try:
@@ -1540,6 +1561,17 @@ def fetch_market_overview(history):
                 otc_ret.tail(20).std() * np.sqrt(252) * 100
             )
             result['otc_market_vol_date'] = result['otc_date']
+
+            history['櫃買波動率快取'] = {
+                'otc_market_vol': result['otc_market_vol'],
+                'otc_market_vol_date': result['otc_market_vol_date']
+            }
+        else:
+            cached_vol = history.get('櫃買波動率快取')
+            if cached_vol:
+                result['otc_market_vol'] = cached_vol.get('otc_market_vol')
+                result['otc_market_vol_date'] = cached_vol.get('otc_market_vol_date')
+                print('[上櫃波動率] 今日無資料，沿用快取：', cached_vol)
     except Exception as error:
         print('上櫃波動率計算失敗：', repr(error))
 
