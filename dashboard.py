@@ -1206,6 +1206,108 @@ def fetch_market_revenue_yoy():
         return None, None
 
 
+SEMI_MONTH_MAP = {
+    'january': 1, 'february': 2, 'march': 3, 'april': 4,
+    'may': 5, 'june': 6, 'july': 7, 'august': 8,
+    'september': 9, 'october': 10, 'november': 11, 'december': 12
+}
+
+
+def fetch_semi_yoy():
+    """
+    全球半導體營收年增率(Semiconductor Revenue YoY)。
+    資料來源：SIA(Semiconductor Industry Association)官方新聞頁，
+    不使用任何第三方網站，也不自行估算。
+
+    做法：
+    1. 抓SIA新聞列表頁，用正規表示式找出最近幾篇
+       「Global (Annual )?Semiconductor Sales...」新聞稿的連結。
+    2. 依序抓取每篇文章「全文」（列表頁上的摘要常被截斷在句子中間，
+       必須進到文章內頁才能取得完整句子）。
+    3. 用正規表示式比對這句固定格式的話：
+       「during the month of <Month> <Year>, an increase/a decrease
+       of X% compared to the <Month> <Year-1> total」，
+       取出年增率(YoY%)與資料對應月份。
+    4. 依序嘗試多篇候選文章，找到第一篇能成功解析出這句話的就回傳；
+       全部都失敗則回傳 (None, None)，由呼叫端沿用history.json裡
+       上一次成功抓到的數值，不顯示空值。
+    """
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Linux; Android 13) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/126.0 Mobile Safari/537.36'
+        )
+    }
+
+    list_urls = [
+        'https://www.semiconductors.org/policies/tax/market-data/?type=post',
+        'https://www.semiconductors.org/news-events/latest-news/'
+    ]
+
+    article_urls = []
+    for list_url in list_urls:
+        try:
+            resp = requests.get(list_url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            found = re.findall(
+                r'https://www\.semiconductors\.org/global-(?:annual-)?semiconductor-sales-[a-z0-9\-]+/',
+                resp.text
+            )
+            for url in found:
+                if url not in article_urls:
+                    article_urls.append(url)
+            print(f'[Semi YoY] {list_url} 找到候選文章數：', len(found))
+        except Exception as error:
+            print(f'[Semi YoY] 新聞列表抓取失敗 {list_url}：', repr(error))
+
+        if article_urls:
+            break
+
+    if not article_urls:
+        print('[Semi YoY] 兩個新聞列表頁都找不到任何相關文章連結')
+        return None, None
+
+    sentence_pattern = re.compile(
+        r'during the month of ([A-Za-z]+)\s+(\d{4}),\s*'
+        r'(an increase|a decrease)\s*of\s*([\d.]+)%\s*'
+        r'compared to the [A-Za-z]+\s+\d{4}\s*total',
+        re.IGNORECASE
+    )
+
+    for article_url in article_urls[:5]:
+        try:
+            resp = requests.get(article_url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            text = re.sub(r'<[^>]+>', ' ', resp.text)
+            text = re.sub(r'\s+', ' ', text)
+
+            match = sentence_pattern.search(text)
+            if not match:
+                print(f'[Semi YoY] {article_url} 找不到符合格式的句子，換下一篇')
+                continue
+
+            month_name, year_str, direction, pct_str = match.groups()
+            month_num = SEMI_MONTH_MAP.get(month_name.lower())
+            if month_num is None:
+                continue
+
+            yoy = float(pct_str)
+            if direction.lower() == 'a decrease':
+                yoy = -yoy
+
+            period = f'{year_str}-{month_num:02d}'
+            print(f'[Semi YoY] 解析成功 {article_url}：YoY={yoy}%，資料月份={period}')
+            return yoy, period
+
+        except Exception as error:
+            print(f'[Semi YoY] 文章抓取/解析失敗 {article_url}：', repr(error))
+            continue
+
+    print('[Semi YoY] 所有候選文章都無法解析出年增率句子')
+    return None, None
+
+
 def fetch_ndc_business_indicators():
     """
     國發會《景氣指標及燈號》資料集(data.gov.tw dataset id 6099)是一份逐月時間序列，
@@ -1416,6 +1518,9 @@ def fetch_market_overview(history):
         'margin_ratio_otc_date': None,
         'revenue_yoy': None,
         'revenue_period': None,
+        'semi_yoy': None,
+        'semi_yoy_month': None,
+        'semi_yoy_update_time': None,
         'foreign_net_sell': None,
         'foreign_net_sell_date': None,
         'foreign_futures_net_oi': None,
@@ -1902,6 +2007,35 @@ def fetch_market_overview(history):
         result['revenue_period'] = period
     except Exception as error:
         print('上市公司YoY整體流程失敗：', repr(error))
+
+    # ---- 全球半導體營收YoY(SIA，失敗時沿用history.json裡上一次成功的數值) ----
+    try:
+        semi_yoy, semi_period = fetch_semi_yoy()
+        if semi_yoy is not None:
+            update_time = datetime.now(TZ).strftime('%Y-%m-%d %H:%M')
+            result['semi_yoy'] = semi_yoy
+            result['semi_yoy_month'] = semi_period
+            result['semi_yoy_update_time'] = update_time
+            history['semi_yoy_cache'] = {
+                'semi_yoy': semi_yoy,
+                'semi_yoy_month': semi_period,
+                'semi_yoy_update_time': update_time
+            }
+        else:
+            cached = history.get('semi_yoy_cache')
+            if cached:
+                result['semi_yoy'] = cached.get('semi_yoy')
+                result['semi_yoy_month'] = cached.get('semi_yoy_month')
+                result['semi_yoy_update_time'] = cached.get('semi_yoy_update_time')
+                print('[Semi YoY] 本次抓取失敗，沿用history.json快取：', cached)
+    except Exception as error:
+        print('全球半導體YoY整體流程失敗：', repr(error))
+        cached = history.get('semi_yoy_cache')
+        if cached:
+            result['semi_yoy'] = cached.get('semi_yoy')
+            result['semi_yoy_month'] = cached.get('semi_yoy_month')
+            result['semi_yoy_update_time'] = cached.get('semi_yoy_update_time')
+            print('[Semi YoY] 例外狀況，沿用history.json快取：', cached)
 
     # ---- 外資賣超 ----
     try:
@@ -2627,7 +2761,7 @@ def main():
                 return 'green'
             return 'yellow'
         if kind == 'margin':
-            if value < 140:
+            if value < 150:
                 return 'red'
             if value <= 170:
                 return 'yellow'
@@ -2639,6 +2773,12 @@ def main():
                 return 'yellow'
             return 'green'
         if kind == 'revenue_yoy':
+            if value < 0:
+                return 'red'
+            if value <= 20:
+                return 'yellow'
+            return 'green'
+        if kind == 'semi_yoy':
             if value < 0:
                 return 'red'
             if value <= 20:
@@ -2768,8 +2908,22 @@ def main():
             alpha=0.95
         )
 
-    # ---- 右欄：櫃買 / 漲跌幅 / 上櫃本益比 / 上櫃波動率 / 日期 ----
+    # ---- 右欄：日期 / 櫃買 / 漲跌幅 / 上櫃本益比 / 上櫃波動率 / Semi YoY ----
     right_x = 0.66
+
+    title_ax.text(
+        right_x,
+        0.985,
+        (
+            '日期：'
+            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
+        ),
+        fontsize=16,
+        ha='left',
+        va='top',
+        color=TEXT_DIM,
+        alpha=0.85
+    )
 
     otc_date_note = format_date_suffix(market.get('otc_date'))
 
@@ -2847,18 +3001,31 @@ def main():
             alpha=0.95
         )
 
+    # ---- Semi YoY(全球半導體營收年增率，資料來源：SIA官方新聞) ----
+    semi_yoy_value = market.get('semi_yoy')
+    if semi_yoy_value is not None:
+        semi_yoy_text = f"{semi_yoy_value:+.1f}%"
+    else:
+        semi_yoy_text = 'N/A'
+
+    semi_yoy_month_text = market.get('semi_yoy_month') or ''
+
+    if semi_yoy_value is not None:
+        draw_signal_light(
+            fig, title_ax,
+            metric_state('semi_yoy', semi_yoy_value),
+            x=right_x, y=0.10, r_px=12
+        )
+
     title_ax.text(
-        right_x,
+        right_x + 0.03,
         0.10,
-        (
-            '日期：'
-            f"{datetime.now(TZ).strftime('%Y/%m/%d %H:%M')}"
-        ),
-        fontsize=18,
+        f"Semi YoY {semi_yoy_text}" + (f"（{semi_yoy_month_text}）" if semi_yoy_month_text else ''),
+        fontsize=20,
         ha='left',
         va='center',
         color=TEXT_DIM,
-        alpha=0.85
+        alpha=0.95
     )
 
     fund_axes = [
@@ -2987,6 +3154,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
