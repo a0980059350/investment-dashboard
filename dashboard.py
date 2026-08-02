@@ -1239,7 +1239,7 @@ def fetch_sox_constituents():
     回傳：[{'ticker': 'NVDA', 'weight': 10.23}, ...]，失敗回傳空list。
     """
     try:
-        resp = requests.get(SOX_LIST_URL, timeout=30)
+        resp = requests.get(SOX_LIST_URL, timeout=60)
         resp.raise_for_status()
 
         with pdfplumber.open(io.BytesIO(resp.content)) as pdf:
