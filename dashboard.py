@@ -3289,3 +3289,71 @@ def main():
                 0.42,
                 (
                     '資料更新失敗\n'
+f'{type(error).__name__}: {error}'
+                ),
+                fontsize=24,
+                color=TEXT_DIM,
+                transform=ax.transAxes
+            )
+
+    save_history(history)
+
+    for ax, etf in zip(etf_axes, ETFS):
+        try:
+            etf_data = fetch_etf(etf['ticker'])
+
+            plot_etf(
+                ax,
+                etf['display'],
+                etf_data,
+                etf['ema'],
+                etf['stop_days'],
+                fig
+            )
+
+        except Exception as error:
+            print(
+                'ETF錯誤:',
+                etf['name'],
+                repr(error)
+            )
+
+            style_card(ax)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+            ax.text(
+                0.04,
+                0.65,
+                etf['display'],
+                fontsize=34,
+                fontweight='bold',
+                color=GOLD,
+                transform=ax.transAxes
+            )
+
+            ax.text(
+                0.04,
+                0.42,
+                (
+                    '資料更新失敗\n'
+                    f'{type(error).__name__}: {error}'
+                ),
+                fontsize=24,
+                color=TEXT_DIM,
+                transform=ax.transAxes
+            )
+
+    plt.savefig(
+        OUTPUT,
+        dpi=100,
+        facecolor=fig.get_facecolor()
+    )
+
+    plt.close(fig)
+
+    print('已產生', OUTPUT)
+
+
+if __name__ == '__main__':
+    main()
