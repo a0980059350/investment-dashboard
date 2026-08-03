@@ -1211,7 +1211,7 @@ SEC_TICKER_MAP_URL = 'https://www.sec.gov/files/company_tickers.json'
 # SEC規定呼叫data.sec.gov必須附帶可辨識身份的User-Agent(含聯絡方式)，
 # 否則容易被判定為未表明身份的爬蟲而擋掉。如需更換聯絡email，直接改這裡即可。
 SEC_HEADERS = {
-    'User-Agent': 'investment-dashboard a0980059350@github (personal wallpaper project)'
+    'User-Agent': 'investment-dashboard a0980059350@gmail.com'
 }
 
 # 常見的營收XBRL標記，不同公司/不同準則(美國GAAP或國際IFRS，
