@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
-import pdfplumber
 
 import matplotlib
 matplotlib.use('Agg')
@@ -1207,7 +1206,6 @@ def fetch_market_revenue_yoy():
         return None, None
 
 
-SOX_LIST_URL = 'https://www.nasdaq.com/docs/SOX'
 SEC_TICKER_MAP_URL = 'https://www.sec.gov/files/company_tickers.json'
 
 # SEC規定呼叫data.sec.gov必須附帶可辨識身份的User-Agent(含聯絡方式)，
@@ -1232,47 +1230,28 @@ REVENUE_TAGS = [
 
 def fetch_sox_constituents():
     """
-    抓費半(SOX，PHLX Semiconductor Sector Index)完整30檔成分股與權重。
-    資料來源：Nasdaq官方PDF(不需登入)。這份PDF網址固定，
-    Nasdaq會定期更新內容反映目前最新成分股，不需要另外維護清單。
+    費半(SOX，PHLX Semiconductor Sector Index)30檔成分股清單。
 
-    回傳：[{'ticker': 'NVDA', 'weight': 10.23}, ...]，失敗回傳空list。
+    原本設計是即時抓Nasdaq官方PDF，但GitHub Actions的IP會被Nasdaq
+    卡住連線(不是明確拒絕，而是逾時不回應，連線層級的問題，
+    調整逾時秒數或標頭都無法解決)，因此改為手動維護的清單。
+
+    這份清單需要「偶爾手動更新」(SOX每季或每半年審視一次成分股，
+    通常一次只變動1-3檔)。要更新時，到以下任一官方頁面查詢最新名單:
+      - https://www.nasdaq.com/docs/SOX (PDF，如果之後連得到的話)
+      - https://indexes.nasdaqomx.com/Index/Overview/SOX
+
+    最後更新日期：2026-08-03(依據當時Nasdaq PDF內容)
     """
-    try:
-        resp = requests.get(SOX_LIST_URL, timeout=60)
-        resp.raise_for_status()
-
-        with pdfplumber.open(io.BytesIO(resp.content)) as pdf:
-            full_text = '\n'.join(
-                (page.extract_text() or '') for page in pdf.pages
-            )
-
-        constituents = []
-        seen_tickers = set()
-        for line in full_text.splitlines():
-            tokens = line.split()
-            if len(tokens) < 2:
-                continue
-            ticker_candidate = tokens[-2]
-            weight_candidate = tokens[-1]
-            if not re.fullmatch(r'[A-Z]{1,6}', ticker_candidate):
-                continue
-            if not re.fullmatch(r'\d{1,3}\.\d{1,2}', weight_candidate):
-                continue
-            if ticker_candidate in seen_tickers:
-                continue
-            seen_tickers.add(ticker_candidate)
-            constituents.append({
-                'ticker': ticker_candidate,
-                'weight': float(weight_candidate)
-            })
-
-        print(f'[Semi YoY][SOX] 解析出成分股數：{len(constituents)}')
-        return constituents
-
-    except Exception as error:
-        print('[Semi YoY][SOX] 成分股清單抓取/解析失敗：', repr(error))
-        return []
+    tickers = [
+        'AMD', 'ADI', 'AMAT', 'ARM', 'ASML', 'ALAB', 'AVGO', 'COHR',
+        'CRDO', 'ENTG', 'GFS', 'INTC', 'KLAC', 'LRCX', 'MTSI', 'MRVL',
+        'MCHP', 'MU', 'MPWR', 'NVMI', 'NVDA', 'NXPI', 'ON', 'QRVO',
+        'QCOM', 'RMBS', 'SWKS', 'TSM', 'TER', 'TXN'
+    ]
+    constituents = [{'ticker': t} for t in tickers]
+    print(f'[Semi YoY][SOX] 使用手動維護清單，成分股數：{len(constituents)}')
+    return constituents
 
 
 def fetch_sec_ticker_cik_map():
@@ -1414,20 +1393,18 @@ def fetch_semi_yoy():
     """
     費半(SOX，PHLX Semiconductor Sector Index)成分股「市值加權」營收年增率。
     資料來源：
-      - 成分股清單：Nasdaq官方PDF(只取用來知道「目前是哪30家」，不使用其公布的權重)
+      - 成分股清單：手動維護的固定清單(見fetch_sox_constituents，
+        原本設計是即時抓Nasdaq PDF，但該網站會卡住GitHub Actions的連線
+        導致逾時，因此改為手動維護，需要偶爾手動更新)
       - 市值：yfinance即時報價
       - 個別公司營收：SEC EDGAR官方XBRL資料(data.sec.gov)
 
     每家公司各自判斷季報/年報並算出自己的YoY%，
-    再用「即時市值」做加權平均(不是用Nasdaq公布的指數權重)，
-    得到整體的市值加權YoY%。
+    再用「即時市值」做加權平均，得到整體的市值加權YoY%。
 
     若成功取得的公司「市值」總和低於全部30家市值總和的50%，
     視為樣本不足，放棄本次結果，回傳(None, None)，
     由呼叫端沿用history.json裡上一次成功抓到的數值。
-
-    成分股清單每次都重新抓取Nasdaq最新公告，若SOX調整成分股(增減公司)，
-    下次執行會自動反映最新名單，不需要手動維護。
     """
     constituents = fetch_sox_constituents()
     if not constituents:
@@ -3223,7 +3200,7 @@ def main():
     title_ax.text(
         right_x + 0.03,
         0.10,
-        f"Semi YoY {semi_yoy_text}" + (f"（{semi_yoy_month_text}）" if semi_yoy_month_text else ''),
+        f"費半YoY {semi_yoy_text}" + (f"（{semi_yoy_month_text}）" if semi_yoy_month_text else ''),
         fontsize=20,
         ha='left',
         va='center',
@@ -3289,7 +3266,7 @@ def main():
                 0.42,
                 (
                     '資料更新失敗\n'
-f'{type(error).__name__}: {error}'
+                    f'{type(error).__name__}: {error}'
                 ),
                 fontsize=24,
                 color=TEXT_DIM,
@@ -3357,3 +3334,14 @@ f'{type(error).__name__}: {error}'
 
 if __name__ == '__main__':
     main()
+
+
+
+
+
+
+
+
+
+
+
