@@ -46,14 +46,16 @@ ETFS = [
         'display': '正2',
         'ticker': '00631L.TW',
         'ema': 32,
-        'stop_days': 40
+        'stop_days': 40,
+        'stop_discount': 0.6
     },
     {
         'name': '00830',
         'display': '費半',
         'ticker': '00830.TW',
         'ema': 42,
-        'stop_days': 60
+        'stop_days': 60,
+        'stop_discount': 0.7
     }
 ]
 
@@ -1206,287 +1208,6 @@ def fetch_market_revenue_yoy():
         return None, None
 
 
-SEC_TICKER_MAP_URL = 'https://www.sec.gov/files/company_tickers.json'
-
-# SEC規定呼叫data.sec.gov必須附帶可辨識身份的User-Agent(含聯絡方式)，
-# 否則容易被判定為未表明身份的爬蟲而擋掉。如需更換聯絡email，直接改這裡即可。
-SEC_HEADERS = {
-    'User-Agent': 'investment-dashboard a0980059350@gmail.com'
-}
-
-# 常見的營收XBRL標記，不同公司/不同準則(美國GAAP或國際IFRS，
-# 外國發行人如ASML/ARM/TSM常用IFRS申報)打的tag名稱不一定相同，
-# 依序嘗試，抓到第一個有資料的就用。
-REVENUE_TAGS = [
-    ('us-gaap', 'RevenueFromContractWithCustomerExcludingAssessedTax'),
-    ('us-gaap', 'RevenueFromContractWithCustomerIncludingAssessedTax'),
-    ('us-gaap', 'Revenues'),
-    ('us-gaap', 'SalesRevenueNet'),
-    ('us-gaap', 'SalesRevenueGoodsNet'),
-    ('ifrs-full', 'Revenue'),
-    ('ifrs-full', 'RevenueFromContractsWithCustomers'),
-]
-
-
-def fetch_sox_constituents():
-    """
-    費半(SOX，PHLX Semiconductor Sector Index)30檔成分股清單。
-
-    原本設計是即時抓Nasdaq官方PDF，但GitHub Actions的IP會被Nasdaq
-    卡住連線(不是明確拒絕，而是逾時不回應，連線層級的問題，
-    調整逾時秒數或標頭都無法解決)，因此改為手動維護的清單。
-
-    這份清單需要「偶爾手動更新」(SOX每季或每半年審視一次成分股，
-    通常一次只變動1-3檔)。要更新時，到以下任一官方頁面查詢最新名單:
-      - https://www.nasdaq.com/docs/SOX (PDF，如果之後連得到的話)
-      - https://indexes.nasdaqomx.com/Index/Overview/SOX
-
-    最後更新日期：2026-08-03(依據當時Nasdaq PDF內容)
-    """
-    tickers = [
-        'AMD', 'ADI', 'AMAT', 'ARM', 'ASML', 'ALAB', 'AVGO', 'COHR',
-        'CRDO', 'ENTG', 'GFS', 'INTC', 'KLAC', 'LRCX', 'MTSI', 'MRVL',
-        'MCHP', 'MU', 'MPWR', 'NVMI', 'NVDA', 'NXPI', 'ON', 'QRVO',
-        'QCOM', 'RMBS', 'SWKS', 'TSM', 'TER', 'TXN'
-    ]
-    constituents = [{'ticker': t} for t in tickers]
-    print(f'[Semi YoY][SOX] 使用手動維護清單，成分股數：{len(constituents)}')
-    return constituents
-
-
-def fetch_sec_ticker_cik_map():
-    """
-    抓SEC官方「股票代號 -> CIK」對照表(全市場，一次抓，重複利用)。
-    """
-    try:
-        resp = requests.get(SEC_TICKER_MAP_URL, headers=SEC_HEADERS, timeout=30)
-        resp.raise_for_status()
-        raw = resp.json()
-
-        ticker_to_cik = {}
-        for entry in raw.values():
-            ticker = str(entry.get('ticker', '')).upper()
-            cik = entry.get('cik_str')
-            if ticker and cik is not None:
-                ticker_to_cik[ticker] = str(cik).zfill(10)
-
-        print(f'[Semi YoY][SOX] SEC ticker/CIK對照表筆數：{len(ticker_to_cik)}')
-        return ticker_to_cik
-
-    except Exception as error:
-        print('[Semi YoY][SOX] SEC ticker/CIK對照表抓取失敗：', repr(error))
-        return {}
-
-
-def fetch_company_revenue_yoy(cik):
-    """
-    抓單一公司(用CIK)的營收資料，自動判斷是「季報公司」還是「年報公司」：
-    - 若該公司有10-Q(季報)資料 -> 用最新一季 vs 去年同一季
-    - 若該公司只有10-K/20-F/40-F(年報)資料，沒有10-Q
-      (常見於外國私人發行人，如ASML/ARM/台積電這類公司) -> 用最新一年 vs 去年同一年
-    這個判斷是「看資料本身有沒有10-Q」，不是寫死哪幾家公司是外國發行人，
-    所以未來SOX成分股更換時，同一套邏輯仍然適用，不需要另外維護名單。
-
-    回傳 (yoy_pct, latest_period_end, duration_days, filer_type) 或
-    None(抓不到可比較資料時回傳None)，filer_type為'季報'或'年報'。
-    """
-    try:
-        resp = requests.get(
-            f'https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json',
-            headers=SEC_HEADERS, timeout=30
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as error:
-        print(f'[Semi YoY][SOX] CIK{cik} companyfacts抓取失敗：', repr(error))
-        return None
-
-    facts = data.get('facts', {})
-
-    entries = []
-    for taxonomy, tag in REVENUE_TAGS:
-        tag_data = facts.get(taxonomy, {}).get(tag)
-        if not tag_data:
-            continue
-        units = tag_data.get('units', {})
-        # 優先用USD，沒有的話就用該tag底下隨便一種幣別
-        # (YoY是比率，同一家公司前後兩期幣別一致，不影響計算)
-        unit_key = 'USD' if 'USD' in units else next(iter(units), None)
-        if unit_key is None:
-            continue
-        for item in units[unit_key]:
-            start = item.get('start')
-            end = item.get('end')
-            val = item.get('val')
-            form = item.get('form', '')
-            if not start or not end or val is None:
-                continue
-            if '10-K' not in form and '10-Q' not in form and '20-F' not in form and '40-F' not in form:
-                continue
-            entries.append({'start': start, 'end': end, 'val': val, 'form': form})
-        if entries:
-            break  # 抓到第一個有資料的tag就不再嘗試其他tag
-
-    if not entries:
-        return None
-
-    # 依「這家公司有沒有10-Q(季報)資料」自動判斷是季報公司還是年報公司
-    # (外國發行人如ASML/ARM/TSM通常只申報20-F年報，沒有10-Q，
-    #  不寫死是哪幾家，未來成分股換了也能自動適用)
-    quarterly_entries = [e for e in entries if '10-Q' in e['form']]
-    is_quarterly_filer = len(quarterly_entries) > 0
-
-    if is_quarterly_filer:
-        candidate_entries = quarterly_entries
-        expected_duration = 91  # 一季約91天
-        duration_tolerance = 20
-    else:
-        candidate_entries = [e for e in entries if ('10-K' in e['form']) or ('20-F' in e['form']) or ('40-F' in e['form'])]
-        expected_duration = 365  # 一年約365天
-        duration_tolerance = 20
-
-    if not candidate_entries:
-        return None
-
-    # 只保留期間長度符合預期(季報~91天/年報~365天)的資料，避免混入累計數字
-    filtered = []
-    for item in candidate_entries:
-        try:
-            item_start = datetime.strptime(item['start'], '%Y-%m-%d')
-            item_end = datetime.strptime(item['end'], '%Y-%m-%d')
-        except ValueError:
-            continue
-        duration = (item_end - item_start).days
-        if abs(duration - expected_duration) <= duration_tolerance:
-            filtered.append({**item, '_start_dt': item_start, '_end_dt': item_end, '_duration': duration})
-
-    if not filtered:
-        return None
-
-    filtered.sort(key=lambda e: e['_end_dt'])
-    latest = filtered[-1]
-    duration_days = latest['_duration']
-
-    # 找「大約一年前、期間長度相近」的那一筆
-    target_end_low = latest['_end_dt'] - pd.Timedelta(days=380)
-    target_end_high = latest['_end_dt'] - pd.Timedelta(days=350)
-
-    prior_candidates = [
-        item for item in filtered
-        if target_end_low <= item['_end_dt'] <= target_end_high
-    ]
-
-    if not prior_candidates:
-        return None
-
-    prior = max(prior_candidates, key=lambda e: e['_end_dt'])
-
-    if prior['val'] == 0:
-        return None
-
-    yoy = (latest['val'] / prior['val'] - 1) * 100
-    filer_type = '季報' if is_quarterly_filer else '年報'
-    return yoy, latest['end'], duration_days, filer_type
-
-
-def fetch_semi_yoy():
-    """
-    費半(SOX，PHLX Semiconductor Sector Index)成分股「市值加權」營收年增率。
-    資料來源：
-      - 成分股清單：手動維護的固定清單(見fetch_sox_constituents，
-        原本設計是即時抓Nasdaq PDF，但該網站會卡住GitHub Actions的連線
-        導致逾時，因此改為手動維護，需要偶爾手動更新)
-      - 市值：yfinance即時報價
-      - 個別公司營收：SEC EDGAR官方XBRL資料(data.sec.gov)
-
-    每家公司各自判斷季報/年報並算出自己的YoY%，
-    再用「即時市值」做加權平均，得到整體的市值加權YoY%。
-
-    若成功取得的公司「市值」總和低於全部30家市值總和的50%，
-    視為樣本不足，放棄本次結果，回傳(None, None)，
-    由呼叫端沿用history.json裡上一次成功抓到的數值。
-    """
-    constituents = fetch_sox_constituents()
-    if not constituents:
-        return None, None
-
-    ticker_to_cik = fetch_sec_ticker_cik_map()
-    if not ticker_to_cik:
-        return None, None
-
-    market_caps = {}
-    for company in constituents:
-        ticker = company['ticker']
-        try:
-            info = yf.Ticker(ticker).fast_info
-            cap = info.get('market_cap') if hasattr(info, 'get') else info['market_cap']
-            if cap:
-                market_caps[ticker] = float(cap)
-        except Exception as error:
-            print(f'[Semi YoY][SOX] {ticker} 市值抓取失敗：', repr(error))
-
-    total_cap = sum(market_caps.values())
-    if total_cap <= 0:
-        print('[Semi YoY][SOX] 全部成分股市值都抓不到，放棄本次結果')
-        return None, None
-
-    matched_cap = 0.0
-    weighted_yoy_sum = 0.0
-    success_count = 0
-    latest_ends = []
-
-    for company in constituents:
-        ticker = company['ticker']
-
-        cap = market_caps.get(ticker)
-        if cap is None:
-            print(f'[Semi YoY][SOX] {ticker} 沒有市值資料，跳過')
-            continue
-
-        cik = ticker_to_cik.get(ticker)
-        if cik is None:
-            print(f'[Semi YoY][SOX] {ticker} 在SEC對照表裡找不到CIK，跳過')
-            continue
-
-        result = fetch_company_revenue_yoy(cik)
-        time.sleep(0.15)  # 禮貌性間隔，SEC規定上限為每秒10次請求
-
-        if result is None:
-            print(f'[Semi YoY][SOX] {ticker} 抓不到可比較的營收資料，跳過')
-            continue
-
-        yoy, period_end, duration_days, filer_type = result
-        weighted_yoy_sum += yoy * cap
-        matched_cap += cap
-        success_count += 1
-        latest_ends.append(period_end)
-        print(
-            f'[Semi YoY][SOX] {ticker}({filer_type}) YoY={yoy:.2f}%，'
-            f'期間長度={duration_days}天，資料截至={period_end}，市值={cap:,.0f}'
-        )
-
-    print(
-        f'[Semi YoY][SOX] 成功家數：{success_count}/{len(constituents)}，'
-        f'涵蓋市值：{matched_cap:,.0f}/{total_cap:,.0f}'
-        f'（{matched_cap / total_cap * 100:.1f}%）'
-    )
-
-    if matched_cap < total_cap * 0.5:
-        print('[Semi YoY][SOX] 涵蓋市值不足50%，樣本不足，放棄本次結果')
-        return None, None
-
-    weighted_yoy = weighted_yoy_sum / matched_cap
-
-    # 用最常見的資料截止日期當作顯示用的期別標籤(各公司財報季度不一定對齊)
-    if latest_ends:
-        most_common_end = pd.Series(latest_ends).mode().iloc[0]
-        period_label = most_common_end
-    else:
-        period_label = None
-
-    print(f'[Semi YoY][SOX] 市值加權YoY結果：{weighted_yoy:.2f}%，期別標籤：{period_label}')
-    return weighted_yoy, period_label
-
 
 def fetch_ndc_business_indicators():
     """
@@ -1698,9 +1419,6 @@ def fetch_market_overview(history):
         'margin_ratio_otc_date': None,
         'revenue_yoy': None,
         'revenue_period': None,
-        'semi_yoy': None,
-        'semi_yoy_month': None,
-        'semi_yoy_update_time': None,
         'foreign_net_sell': None,
         'foreign_net_sell_date': None,
         'foreign_futures_net_oi': None,
@@ -2188,35 +1906,6 @@ def fetch_market_overview(history):
     except Exception as error:
         print('上市公司YoY整體流程失敗：', repr(error))
 
-    # ---- 全球半導體營收YoY(SIA，失敗時沿用history.json裡上一次成功的數值) ----
-    try:
-        semi_yoy, semi_period = fetch_semi_yoy()
-        if semi_yoy is not None:
-            update_time = datetime.now(TZ).strftime('%Y-%m-%d %H:%M')
-            result['semi_yoy'] = semi_yoy
-            result['semi_yoy_month'] = semi_period
-            result['semi_yoy_update_time'] = update_time
-            history['semi_yoy_cache'] = {
-                'semi_yoy': semi_yoy,
-                'semi_yoy_month': semi_period,
-                'semi_yoy_update_time': update_time
-            }
-        else:
-            cached = history.get('semi_yoy_cache')
-            if cached:
-                result['semi_yoy'] = cached.get('semi_yoy')
-                result['semi_yoy_month'] = cached.get('semi_yoy_month')
-                result['semi_yoy_update_time'] = cached.get('semi_yoy_update_time')
-                print('[Semi YoY] 本次抓取失敗，沿用history.json快取：', cached)
-    except Exception as error:
-        print('全球半導體YoY整體流程失敗：', repr(error))
-        cached = history.get('semi_yoy_cache')
-        if cached:
-            result['semi_yoy'] = cached.get('semi_yoy')
-            result['semi_yoy_month'] = cached.get('semi_yoy_month')
-            result['semi_yoy_update_time'] = cached.get('semi_yoy_update_time')
-            print('[Semi YoY] 例外狀況，沿用history.json快取：', cached)
-
     # ---- 外資賣超 ----
     try:
         net_value, net_date = fetch_foreign_net_sell()
@@ -2609,7 +2298,7 @@ def plot_fund(ax, name, data, high_1y, fig):
 
     high = high_1y if high_1y is not None else local_high
     drawdown = latest / high - 1
-    add_price = high * 0.8
+    add_price = high * 0.7
 
     if len(data) >= 2:
         change_pct = data['Value'].iloc[-1] / data['Value'].iloc[-2] - 1
@@ -2646,13 +2335,10 @@ def plot_fund(ax, name, data, high_1y, fig):
 
     if abs_drawdown > 0.20:
         fund_state = 'green'
-        fund_status = '可以加碼'
-    elif abs_drawdown > 0.10:
-        fund_state = 'yellow'
-        fund_status = '觀察加碼'
     else:
         fund_state = 'red'
-        fund_status = '暫停加碼'
+
+    fund_status = f'回撤{drawdown:.1%}'
 
     ax.text(
         0.04,
@@ -2674,8 +2360,7 @@ def plot_fund(ax, name, data, high_1y, fig):
             f'漲跌幅 {change_pct:+.2%}\n'
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
-            f'8折價 {add_price:.2f}\n'
-            f'回撤 {drawdown:.1%}\n'
+            f'7折價 {add_price:.2f}\n'
             f'{multi_return_line}'
         ),
         transform=ax.transAxes,
@@ -2684,6 +2369,15 @@ def plot_fund(ax, name, data, high_1y, fig):
         fontsize=24,
         color=TEXT,
         linespacing=1.7
+    )
+
+    ax.axhline(
+        add_price,
+        color='white',
+        lw=1.2,
+        ls='--',
+        alpha=0.7,
+        zorder=7
     )
 
     draw_signal_light(fig, ax, fund_state, label=fund_status)
@@ -2703,7 +2397,7 @@ def plot_fund(ax, name, data, high_1y, fig):
     )
 
 
-def plot_etf(ax, name, etf_bundle, ema_period, stop_days, fig):
+def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
     data = etf_bundle['weekly']
     x = np.arange(len(data))
 
@@ -2725,9 +2419,10 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, fig):
 
     drawdown = latest / high - 1
 
-    # 停損價 = 還原日線近一年(近252個交易日)最高價 × (1 - 20%)
+    # 停損價 = 還原日線近一年(近252個交易日)最高價 × 折數(每檔ETF折數不同，見ETFS設定)
     high_1y = float(etf_bundle['daily_high'].tail(252).max())
-    stop = high_1y * 0.8
+    stop = high_1y * stop_discount
+    discount_label = f'{round(stop_discount * 10)}折'
 
     if live_prev_close:
         change_pct = latest / live_prev_close - 1
@@ -2790,24 +2485,14 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, fig):
         high + data_range * 0.14
     )
 
-    week_complete = is_week_complete(data.index[-1])
-    signal_index = -1 if week_complete else -2
-
-    signal_close = float(data['Close'].iloc[signal_index])
-    signal_ema = float(ema.iloc[signal_index])
-
-    above_ema = signal_close > signal_ema
     abs_drawdown = abs(drawdown)
 
-    if not above_ema:
-        etf_state = 'red'
-        status = f'跌破{ema_period}週線'
-    elif abs_drawdown > 0.20:
-        etf_state = 'yellow'
-        status = '暫時離場'
-    else:
+    if abs_drawdown > 0.20:
         etf_state = 'green'
-        status = f'站上{ema_period}週線'
+    else:
+        etf_state = 'red'
+
+    status = f'回撤{drawdown:.1%}'
 
     ax.text(
         0.04,
@@ -2835,8 +2520,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, fig):
             f'漲跌幅 {change_pct:+.2%}\n'
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
-            f'回撤 {drawdown:.1%}\n'
-            f'20%停損價 {stop:.2f}\n'
+            f'{discount_label}停損價 {stop:.2f}\n'
             f'{multi_return_line}'
         ),
         transform=ax.transAxes,
@@ -2845,6 +2529,15 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, fig):
         fontsize=24,
         color=TEXT,
         linespacing=1.65
+    )
+
+    ax.axhline(
+        stop,
+        color='white',
+        lw=1.2,
+        ls='--',
+        alpha=0.7,
+        zorder=7
     )
 
     draw_signal_light(fig, ax, etf_state, label=status)
@@ -2953,12 +2646,6 @@ def main():
                 return 'yellow'
             return 'green'
         if kind == 'revenue_yoy':
-            if value < 0:
-                return 'red'
-            if value <= 20:
-                return 'yellow'
-            return 'green'
-        if kind == 'semi_yoy':
             if value < 0:
                 return 'red'
             if value <= 20:
@@ -3088,7 +2775,7 @@ def main():
             alpha=0.95
         )
 
-    # ---- 右欄：日期 / 櫃買 / 漲跌幅 / 上櫃本益比 / 上櫃波動率 / Semi YoY ----
+    # ---- 右欄：日期 / 櫃買 / 漲跌幅 / 上櫃本益比 / 上櫃波動率 / 外資賣超 / 外資未平倉 ----
     right_x = 0.66
 
     title_ax.text(
@@ -3181,26 +2868,39 @@ def main():
             alpha=0.95
         )
 
-    # ---- Semi YoY(全球半導體營收年增率，資料來源：SIA官方新聞) ----
-    semi_yoy_value = market.get('semi_yoy')
-    if semi_yoy_value is not None:
-        semi_yoy_text = f"{semi_yoy_value:+.1f}%"
+    # ---- 外資賣超 ----
+    net_sell_value = market.get('foreign_net_sell')
+    net_sell_date = market.get('foreign_net_sell_date')
+    if net_sell_value is not None:
+        net_sell_text = f"{net_sell_value / 1e8:+.1f}億"
     else:
-        semi_yoy_text = 'N/A'
-
-    semi_yoy_month_text = market.get('semi_yoy_month') or ''
-
-    if semi_yoy_value is not None:
-        draw_signal_light(
-            fig, title_ax,
-            metric_state('semi_yoy', semi_yoy_value),
-            x=right_x, y=0.10, r_px=12
-        )
+        net_sell_text = 'N/A'
+    net_sell_note = format_date_suffix(net_sell_date)
 
     title_ax.text(
-        right_x + 0.03,
-        0.10,
-        f"費半YoY {semi_yoy_text}" + (f"（{semi_yoy_month_text}）" if semi_yoy_month_text else ''),
+        right_x,
+        0.18,
+        f"外資賣超 {net_sell_text}{net_sell_note}",
+        fontsize=20,
+        ha='left',
+        va='center',
+        color=TEXT_DIM,
+        alpha=0.95
+    )
+
+    # ---- 外資未平倉 ----
+    net_oi_value = market.get('foreign_futures_net_oi')
+    net_oi_date = market.get('foreign_futures_net_oi_date')
+    if net_oi_value is not None:
+        net_oi_text = f"{net_oi_value:+,.0f}口"
+    else:
+        net_oi_text = 'N/A'
+    net_oi_note = format_date_suffix(net_oi_date)
+
+    title_ax.text(
+        right_x,
+        0.06,
+        f"外資未平倉 {net_oi_text}{net_oi_note}",
         fontsize=20,
         ha='left',
         va='center',
@@ -3285,6 +2985,7 @@ def main():
                 etf_data,
                 etf['ema'],
                 etf['stop_days'],
+                etf['stop_discount'],
                 fig
             )
 
