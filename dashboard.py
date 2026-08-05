@@ -2520,7 +2520,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
             f'漲跌幅 {change_pct:+.2%}\n'
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
-            f'{discount_label}停損價 {stop:.2f}\n'
+            f'{discount_label}價 {stop:.2f}\n'
             f'{multi_return_line}'
         ),
         transform=ax.transAxes,
@@ -2880,7 +2880,7 @@ def main():
     title_ax.text(
         right_x,
         0.18,
-        f"外資賣超 {net_sell_text}{net_sell_note}",
+        f"外資買賣超 {net_sell_text}{net_sell_note}",
         fontsize=20,
         ha='left',
         va='center',
@@ -3035,7 +3035,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
 
