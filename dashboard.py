@@ -2542,6 +2542,21 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
 
     draw_signal_light(fig, ax, etf_state, label=status)
 
+    # ---- 正2專屬: 站上/跌破週線紅綠燈, 放在回撤燈號正下方 ----
+    if name == '正2':
+        last_idx = -1 if is_week_complete(data.index[-1]) else -2
+        week_close = float(data['Close'].iloc[last_idx])
+        week_ema = float(ema.iloc[last_idx])
+
+        weekly_state = 'green' if week_close > week_ema else 'red'
+        weekly_label = '站上週線' if weekly_state == 'green' else '跌破週線'
+
+        draw_signal_light(
+            fig, ax, weekly_state,
+            label=weekly_label,
+            x=0.92, y=0.85
+        )
+
     ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
     ax.set_xlim(-1, len(x))
 
@@ -3035,6 +3050,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
