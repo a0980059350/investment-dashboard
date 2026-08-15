@@ -496,8 +496,10 @@ def history_to_chart_data(fund_history):
 def fetch_twse_realtime(ticker):
     """
     直接抓證交所(TWSE)公開的即時資訊API，跟券商APP同一組資料源。
-    回傳 (最新價, 昨收盤價)，抓不到或格式不對就回傳 (None, None)，
-    由呼叫端 fallback 回 yfinance 的做法。
+    回傳 (最新價, 昨收盤價, 交易日期)，交易日期取API的'd'欄位(格式yyyymmdd)，
+    代表這筆「最新價」實際對應的交易日，不是程式執行的當下時間。
+    抓不到或格式不對就回傳 (None, None, None)，由呼叫端 fallback 回
+    yfinance 的做法。
     """
     symbol = ticker.replace('.TW', '').replace('.TWO', '')
     ex_ch = f'tse_{symbol}.tw'
@@ -525,26 +527,31 @@ def fetch_twse_realtime(ticker):
 
         rows = payload.get('msgArray') or []
         if not rows:
-            return None, None
+            return None, None, None
 
         row = rows[0]
         raw_price = row.get('z')
         raw_prev_close = row.get('y')
+        raw_date = row.get('d')  # 交易日期，格式yyyymmdd
 
         # 'z' 在非交易時間或尚無成交時會是 '-'，視為抓取失敗
         if not raw_price or raw_price == '-':
-            return None, None
+            return None, None, None
         if not raw_prev_close or raw_prev_close == '-':
-            return None, None
+            return None, None, None
 
-        return float(raw_price), float(raw_prev_close)
+        trade_date = None
+        if raw_date and re.fullmatch(r'\d{8}', str(raw_date)):
+            trade_date = pd.Timestamp(str(raw_date))
+
+        return float(raw_price), float(raw_prev_close), trade_date
 
     except Exception as error:
         print(
             f'{ticker} TWSE即時報價抓取失敗，改用yfinance：',
             repr(error)
         )
-        return None, None
+        return None, None, None
 
 
 def fetch_taiex_realtime():
@@ -2013,7 +2020,9 @@ def fetch_etf(ticker):
     # 這是跟券商APP同一組資料源，不用透過yfinance轉手。
     # 抓不到才 fallback 用 fast_info，再不行才退回歷史K棒最後一筆。
     # EMA、最高價、回撤、停損價這些仍然用歷史K棒 (daily_adj) 算，不受影響。
-    live_price, live_prev_close = fetch_twse_realtime(ticker)
+    # price_date 記錄「最新價」實際對應的交易日期，用於畫面顯示日期，
+    # 跟程式執行的當下時間(datetime.now)是兩回事。
+    live_price, live_prev_close, price_date = fetch_twse_realtime(ticker)
 
     if live_price is None:
         try:
@@ -2040,6 +2049,11 @@ def fetch_etf(ticker):
         else:
             live_prev_close = float(daily_raw_close.iloc[-1])
 
+    if price_date is None:
+        # TWSE沒給日期(例如fallback走fast_info或歷史K棒那條路)時，
+        # 用歷史K棒最後一筆收盤價的日期當作最佳猜測。
+        price_date = daily_raw_close.index[-1]
+
     return {
         'weekly': weekly_data.dropna().tail(53),
         'daily_adj': data['Close'],
@@ -2047,7 +2061,8 @@ def fetch_etf(ticker):
         'daily_high': data['High'],
         'daily_raw': daily_raw_close,
         'live_price': live_price,
-        'live_prev_close': live_prev_close
+        'live_prev_close': live_prev_close,
+        'price_date': price_date
     }
 
 
@@ -2342,14 +2357,26 @@ def plot_fund(ax, name, data, high_1y, fig):
 
     ax.text(
         0.04,
-        0.93,
+        0.965,
         name,
         transform=ax.transAxes,
         fontsize=30,
         fontweight='bold',
         color=GOLD,
         ha='left',
-        va='top',
+        va='center',
+        zorder=20
+    )
+
+    ax.text(
+        0.04,
+        0.885,
+        f'（{latest_date.month}／{latest_date.day}）',
+        transform=ax.transAxes,
+        fontsize=18,
+        color=TEXT_DIM,
+        ha='left',
+        va='center',
         zorder=20
     )
 
@@ -2493,17 +2520,30 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
         etf_state = 'red'
 
     status = f'回撤{drawdown:.1%}'
+    price_date = etf_bundle['price_date']
 
     ax.text(
         0.04,
-        0.93,
+        0.965,
         name,
         transform=ax.transAxes,
         fontsize=30,
         fontweight='bold',
         color=GOLD,
         ha='left',
-        va='top',
+        va='center',
+        zorder=20
+    )
+
+    ax.text(
+        0.04,
+        0.885,
+        f'（{price_date.month}／{price_date.day}）',
+        transform=ax.transAxes,
+        fontsize=18,
+        color=TEXT_DIM,
+        ha='left',
+        va='center',
         zorder=20
     )
 
@@ -2542,14 +2582,26 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
 
     draw_signal_light(fig, ax, etf_state, label=status)
 
-    # ---- 正2專屬: 站上/跌破週線紅綠燈, 放在回撤燈號正下方 ----
+    # ---- 正2專屬: 站上/跌破週線紅綠燈，加入3%緩衝門檻，放在回撤燈號正下方 ----
+    # 乖離率(週收盤價相對EMA的比例) >= +3% -> 綠燈(確認站上週線)
+    # 乖離率 <= -3% -> 紅燈(確認跌破週線)
+    # -3% ~ +3% 之間 -> 黃燈(貼著週線附近，中性區)
     if name == '正2':
+        WEEKLY_BUFFER_PCT = 0.03
+
         last_idx = -1 if is_week_complete(data.index[-1]) else -2
         week_close = float(data['Close'].iloc[last_idx])
         week_ema = float(ema.iloc[last_idx])
+        week_ratio = week_close / week_ema - 1
 
-        weekly_state = 'green' if week_close > week_ema else 'red'
-        weekly_label = '站上週線' if weekly_state == 'green' else '跌破週線'
+        if week_ratio >= WEEKLY_BUFFER_PCT:
+            weekly_state = 'green'
+        elif week_ratio <= -WEEKLY_BUFFER_PCT:
+            weekly_state = 'red'
+        else:
+            weekly_state = 'yellow'
+
+        weekly_label = '站上週線' if week_close > week_ema else '跌破週線'
 
         draw_signal_light(
             fig, ax, weekly_state,
@@ -2923,12 +2975,13 @@ def main():
         alpha=0.95
     )
 
-    fund_axes = [
+    # 版面配置: 正2/費半(ETF)放上排、安聯/統一(基金)放下排
+    etf_axes = [
         fig.add_subplot(grid[1, 0]),
         fig.add_subplot(grid[1, 1])
     ]
 
-    etf_axes = [
+    fund_axes = [
         fig.add_subplot(grid[2, 0]),
         fig.add_subplot(grid[2, 1])
     ]
@@ -3050,6 +3103,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
