@@ -2601,7 +2601,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
         else:
             weekly_state = 'yellow'
 
-        weekly_label = '站上週線' if week_close > week_ema else '跌破週線'
+        weekly_label = f"站上週線{week_ratio*100:+.1f}%" if week_close > week_ema else f"跌破週線{week_ratio*100:+.1f}%"
 
         draw_signal_light(
             fig, ax, weekly_state,
