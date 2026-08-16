@@ -45,7 +45,7 @@ ETFS = [
         'name': '00631L',
         'display': '正2',
         'ticker': '00631L.TW',
-        'ema': 32,
+        'ema': 28,
         'stop_days': 40,
         'stop_discount': 0.6
     },
@@ -2582,12 +2582,12 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
 
     draw_signal_light(fig, ax, etf_state, label=status)
 
-    # ---- 正2專屬: 站上/跌破週線紅綠燈，加入3%緩衝門檻，放在回撤燈號正下方 ----
-    # 乖離率(週收盤價相對EMA的比例) >= +3% -> 綠燈(確認站上週線)
-    # 乖離率 <= -3% -> 紅燈(確認跌破週線)
-    # -3% ~ +3% 之間 -> 黃燈(貼著週線附近，中性區)
+    # ---- 正2專屬: 站上/跌破週線紅綠燈，加入5%緩衝門檻，放在回撤燈號正下方 ----
+    # 用28週EMA(還原股價)，乖離率(週收盤價相對EMA的比例) >= +5% -> 綠燈
+    # (確認站上週線)；乖離率 <= -5% -> 紅燈(確認跌破週線)；
+    # -5% ~ +5% 之間 -> 黃燈(貼著週線附近，中性區)
     if name == '正2':
-        WEEKLY_BUFFER_PCT = 0.03
+        WEEKLY_BUFFER_PCT = 0.05
 
         last_idx = -1 if is_week_complete(data.index[-1]) else -2
         week_close = float(data['Close'].iloc[last_idx])
@@ -3103,6 +3103,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
