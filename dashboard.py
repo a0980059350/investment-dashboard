@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager
 from matplotlib.patches import Rectangle, Circle
 from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.transforms import IdentityTransform
+from matplotlib.transforms import IdentityTransform, offset_copy
 
 
 TZ = ZoneInfo('Asia/Taipei')
@@ -45,17 +45,19 @@ ETFS = [
         'name': '00631L',
         'display': '正2',
         'ticker': '00631L.TW',
-        'ema': 28,
+        'ema': 26,
         'stop_days': 40,
-        'stop_discount': 0.6
+        'stop_discount': 0.5,
+        'long_ma_years': 5
     },
     {
         'name': '00830',
         'display': '費半',
         'ticker': '00830.TW',
-        'ema': 42,
+        'ema': 26,
         'stop_days': 60,
-        'stop_discount': 0.7
+        'stop_discount': 0.6,
+        'long_ma_years': 4
     }
 ]
 
@@ -85,6 +87,16 @@ LIGHT_YELLOW_EDGE = '#fff0a8'
 
 LIGHT_RED = '#ff4d4d'
 LIGHT_RED_EDGE = '#ffb3b3'
+
+# 漲跌幅文字顏色：漲用紅色、跌用綠色(台股慣例)
+CHANGE_UP_COLOR = '#ff4d4d'
+CHANGE_DOWN_COLOR = '#3ddc84'
+
+
+def change_color(pct):
+    if pct is None:
+        return TEXT_DIM
+    return CHANGE_UP_COLOR if pct >= 0 else CHANGE_DOWN_COLOR
 
 
 _PANEL_CMAP = LinearSegmentedColormap.from_list(
@@ -2056,6 +2068,7 @@ def fetch_etf(ticker):
 
     return {
         'weekly': weekly_data.dropna().tail(53),
+        'weekly_close_full': weekly_data['Close'].dropna(),
         'daily_adj': data['Close'],
         'daily_low': data['Low'],
         'daily_high': data['High'],
@@ -2380,11 +2393,14 @@ def plot_fund(ax, name, data, high_1y, fig):
         zorder=20
     )
 
+    fund_fontsize = 24
+    fund_linespacing = 1.7
+    remaining_lines = 4  # 最新價/最高價/7折價/報酬率
+
     ax.text(
         0.97,
         0.06,
         (
-            f'漲跌幅 {change_pct:+.2%}\n'
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
             f'7折價 {add_price:.2f}\n'
@@ -2393,9 +2409,26 @@ def plot_fund(ax, name, data, high_1y, fig):
         transform=ax.transAxes,
         ha='right',
         va='bottom',
-        fontsize=24,
+        fontsize=fund_fontsize,
         color=TEXT,
-        linespacing=1.7
+        linespacing=fund_linespacing
+    )
+
+    change_offset_trans = offset_copy(
+        ax.transAxes, fig=fig,
+        x=0, y=fund_fontsize * fund_linespacing * remaining_lines,
+        units='points'
+    )
+
+    ax.text(
+        0.97,
+        0.06,
+        f'漲跌幅 {change_pct:+.2%}',
+        transform=change_offset_trans,
+        ha='right',
+        va='bottom',
+        fontsize=fund_fontsize,
+        color=change_color(change_pct)
     )
 
     ax.axhline(
@@ -2424,7 +2457,7 @@ def plot_fund(ax, name, data, high_1y, fig):
     )
 
 
-def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
+def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig, long_ma_years):
     data = etf_bundle['weekly']
     x = np.arange(len(data))
 
@@ -2433,6 +2466,19 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
         .ewm(span=ema_period, adjust=False)
         .mean()
     )
+
+    # 長天期均線(正2用5年線、費半用4年線，見ETFS設定的long_ma_years)：
+    # 用「完整週線收盤價」(weekly_close_full，未截斷到近53週)去算，
+    # 這樣才有足夠歷史資料讓均線暖機，不會因為只用近一年資料計算而失真。
+    # 算完後再對齊回目前圖表顯示的53週範圍(data.index)。
+    long_ma_span_weeks = int(round(long_ma_years * 52))
+    weekly_close_full = etf_bundle['weekly_close_full']
+    long_ma_full = (
+        weekly_close_full
+        .ewm(span=long_ma_span_weeks, adjust=False)
+        .mean()
+    )
+    long_ma = long_ma_full.reindex(data.index)
 
     # 「最高價」改用還原週線的盤中最高點 (週K棒的High)，不是收盤價 (Close)。
     # data 本身已經是 fetch_etf() 裡取近一年 (tail 53週) 的還原週線，
@@ -2505,6 +2551,18 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
         zorder=6
     )
 
+    ax.plot(
+        x,
+        long_ma.values,
+        lw=1.6,
+        ls='-',
+        label=f'{long_ma_years}年線',
+        color='white',
+        alpha=0.85,
+        solid_capstyle='round',
+        zorder=6
+    )
+
     y_min, y_max = ax.get_ylim()
     data_range = high - y_min
     ax.set_ylim(
@@ -2553,11 +2611,14 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
         etf_bundle['daily_adj'].values
     )
 
+    etf_fontsize = 24
+    etf_linespacing = 1.65
+    etf_remaining_lines = 4  # 最新價/最高價/discount/報酬率
+
     ax.text(
         0.97,
         0.06,
         (
-            f'漲跌幅 {change_pct:+.2%}\n'
             f'最新價 {latest:.2f}\n'
             f'最高價 {high:.2f}\n'
             f'{discount_label}價 {stop:.2f}\n'
@@ -2566,9 +2627,26 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
         transform=ax.transAxes,
         ha='right',
         va='bottom',
-        fontsize=24,
+        fontsize=etf_fontsize,
         color=TEXT,
-        linespacing=1.65
+        linespacing=etf_linespacing
+    )
+
+    etf_change_offset_trans = offset_copy(
+        ax.transAxes, fig=fig,
+        x=0, y=etf_fontsize * etf_linespacing * etf_remaining_lines,
+        units='points'
+    )
+
+    ax.text(
+        0.97,
+        0.06,
+        f'漲跌幅 {change_pct:+.2%}',
+        transform=etf_change_offset_trans,
+        ha='right',
+        va='bottom',
+        fontsize=etf_fontsize,
+        color=change_color(change_pct)
     )
 
     ax.axhline(
@@ -2580,34 +2658,36 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig):
         zorder=7
     )
 
-    draw_signal_light(fig, ax, etf_state, label=status)
+    # ---- 第3點:回撤燈號跟站上週線燈號互換位置 ----
+    # 回撤燈號原本在最上面(y=0.965預設)，現在移到下面(y=0.85)
+    draw_signal_light(fig, ax, etf_state, label=status, x=0.92, y=0.85)
 
-    # ---- 正2專屬: 站上/跌破週線紅綠燈，加入5%緩衝門檻，放在回撤燈號正下方 ----
-    # 用28週EMA(還原股價)，乖離率(週收盤價相對EMA的比例) >= +5% -> 綠燈
-    # (確認站上週線)；乖離率 <= -5% -> 紅燈(確認跌破週線)；
-    # -5% ~ +5% 之間 -> 黃燈(貼著週線附近，中性區)
-    if name == '正2':
-        WEEKLY_BUFFER_PCT = 0.05
+    # ---- 站上/跌破週線紅綠燈，正2跟費半都套用同一套規則 ----
+    # 用EMA{ema_period}週(還原股價)，乖離率(週收盤價相對EMA的比例) >= +7% -> 綠燈
+    # (確認站上週線)；乖離率 <= -7% -> 紅燈(確認跌破週線)；
+    # -7% ~ +7% 之間 -> 黃燈(貼著週線附近，中性區)
+    # 移到原本回撤燈號的位置(y=0.965，也就是最上面)
+    WEEKLY_BUFFER_PCT = 0.07
 
-        last_idx = -1 if is_week_complete(data.index[-1]) else -2
-        week_close = float(data['Close'].iloc[last_idx])
-        week_ema = float(ema.iloc[last_idx])
-        week_ratio = week_close / week_ema - 1
+    last_idx = -1 if is_week_complete(data.index[-1]) else -2
+    week_close = float(data['Close'].iloc[last_idx])
+    week_ema = float(ema.iloc[last_idx])
+    week_ratio = week_close / week_ema - 1
 
-        if week_ratio >= WEEKLY_BUFFER_PCT:
-            weekly_state = 'green'
-        elif week_ratio <= -WEEKLY_BUFFER_PCT:
-            weekly_state = 'red'
-        else:
-            weekly_state = 'yellow'
+    if week_ratio >= WEEKLY_BUFFER_PCT:
+        weekly_state = 'green'
+    elif week_ratio <= -WEEKLY_BUFFER_PCT:
+        weekly_state = 'red'
+    else:
+        weekly_state = 'yellow'
 
-        weekly_label = f"站上週線{week_ratio*100:+.1f}%" if week_close > week_ema else f"跌破週線{week_ratio*100:+.1f}%"
+    weekly_label = f"站上週線{week_ratio*100:+.1f}%" if week_close > week_ema else f"跌破週線{week_ratio*100:+.1f}%"
 
-        draw_signal_light(
-            fig, ax, weekly_state,
-            label=weekly_label,
-            x=0.92, y=0.85
-        )
+    draw_signal_light(
+        fig, ax, weekly_state,
+        label=weekly_label,
+        x=0.92, y=0.965
+    )
 
     ax.grid(alpha=0.08, color=GOLD_DIM, lw=0.6)
     ax.set_xlim(-1, len(x))
@@ -2785,7 +2865,7 @@ def main():
         fontsize=20,
         ha='left',
         va='center',
-        color=TEXT_DIM,
+        color=change_color(market['taiex_change_pct']),
         alpha=0.95
     )
 
@@ -2885,7 +2965,7 @@ def main():
         fontsize=20,
         ha='left',
         va='center',
-        color=TEXT_DIM,
+        color=change_color(market.get('otc_change_pct')),
         alpha=0.95
     )
 
@@ -3054,7 +3134,8 @@ def main():
                 etf['ema'],
                 etf['stop_days'],
                 etf['stop_discount'],
-                fig
+                fig,
+                etf['long_ma_years']
             )
 
         except Exception as error:
@@ -3103,6 +3184,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
