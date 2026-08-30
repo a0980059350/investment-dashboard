@@ -62,6 +62,18 @@ ETFS = [
 ]
 
 
+# 加權/櫃買指數改用自行累積歷史來算近一年高點後，剛換上去那幾天累積筆數
+# 還很少，算出來的高點會偏低。這裡手動回填一筆已知的近一年最高點當種子，
+# 讓回撤從第一次執行開始就是準的，之後每天的即時價會繼續疊加進同一份
+# 歷史，種子這筆大約一年後會自然從滾動窗口中淘汰掉，屆時完全交給累積
+# 資料自己決定高點。日期是從K線圖高點位置目視估計的，不是精確值，
+# 如果知道確切日期可以自行修改下面的'date'。
+INDEX_HIGH_SEED = {
+    '加權指數歷史': {'date': '2026-06-19', 'value': 48218.87},
+    '櫃買指數歷史': {'date': '2026-06-19', 'value': 459.56}
+}
+
+
 # ---- 黑金配色 ----
 BG = '#050505'
 PANEL = '#111111'
@@ -434,6 +446,20 @@ def compute_market_pe_stats(df, today_pe):
     percentile = float((values <= today_pe).mean() * 100)
 
     return mean, std, z_score, percentile, len(df)
+
+
+def seed_index_history(history, key):
+    """
+    把INDEX_HIGH_SEED裡手動回填的高點塞進歷史紀錄(只在該筆日期還不存在時
+    才塞，不會覆蓋掉之後每天累積的真實資料)。
+    """
+    seed = INDEX_HIGH_SEED.get(key)
+    if not seed:
+        return
+
+    fund_history = history.setdefault(key, {})
+    if seed['date'] not in fund_history:
+        fund_history[seed['date']] = seed['value']
 
 
 def update_history_and_get_high(history, fund_name, data):
@@ -1497,20 +1523,19 @@ def fetch_market_overview(history):
     except Exception as error:
         print('大盤波動率計算失敗：', repr(error))
 
-    # ---- 加權指數回撤（近一年高點）----
+    # ---- 加權指數回撤（改用自行累積的歷史價格滾動近一年高點，跟櫃買同一套邏輯，不再依賴yfinance）----
     try:
-        twii_1y = yf.download(
-            '^TWII', period='1y', interval='1d',
-            auto_adjust=True, progress=False,
-            threads=False, timeout=30
-        )
-        if isinstance(twii_1y.columns, pd.MultiIndex):
-            twii_1y.columns = twii_1y.columns.get_level_values(0)
+        if result.get('taiex_price') is not None:
+            seed_index_history(history, '加權指數歷史')
+            taiex_index_df = pd.DataFrame({
+                'Date': [pd.Timestamp.now(tz=TZ).tz_localize(None).normalize()],
+                'Value': [result['taiex_price']]
+            })
+            taiex_high_1y = update_history_and_get_high(history, '加權指數歷史', taiex_index_df)
 
-        taiex_high_1y = float(twii_1y['High'].tail(252).max())
-        if result.get('taiex_price') and taiex_high_1y:
-            result['taiex_drawdown'] = result['taiex_price'] / taiex_high_1y - 1
-            print(f'[加權回撤] 近一年高點={taiex_high_1y}，回撤={result["taiex_drawdown"]}')
+            if taiex_high_1y:
+                result['taiex_drawdown'] = result['taiex_price'] / taiex_high_1y - 1
+                print(f'[加權回撤] 累積歷史一年高點={taiex_high_1y}，回撤={result["taiex_drawdown"]}')
     except Exception as error:
         print('加權回撤計算失敗：', repr(error))
 
@@ -1611,37 +1636,25 @@ def fetch_market_overview(history):
     except Exception as error:
         print('上櫃波動率計算失敗：', repr(error))
 
-    # ---- 櫃買指數回撤（近一年高點；優先用yfinance拉一年資料，失敗則退回tpex_index現有天數）----
+    # ---- 櫃買指數回撤（改用自行累積的歷史收盤價滾動近一年高點，不再依賴yfinance ^TWOII）----
+    # 原本優先用yfinance抓'^TWOII'常抓不到，會退回tpex_index只有約一個月
+    # 資料的備援，算出來的「一年高點」嚴重失真(例如把459.56的真實高點
+    # 漏掉，回撤只算出-0.8%)。改成跟基金淨值一樣的做法：每次執行都把
+    # 當天櫃買指數收盤價存進history.json，隨時間自己累積出真正的近一年
+    # 高點。剛換上去的前幾個月，因為歷史還沒累積滿一年，算出來的高點
+    # 只是「目前已累積天數內的最高」，會隨時間自動變準。
     try:
-        otc_high_1y = None
-        try:
-            twoii_1y = yf.download(
-                '^TWOII', period='1y', interval='1d',
-                auto_adjust=True, progress=False,
-                threads=False, timeout=30
-            )
-            if isinstance(twoii_1y.columns, pd.MultiIndex):
-                twoii_1y.columns = twoii_1y.columns.get_level_values(0)
-            if len(twoii_1y) > 0:
-                otc_high_1y = float(twoii_1y['High'].tail(252).max())
-        except Exception as error:
-            print('[櫃買回撤] yfinance抓一年資料失敗，改用tpex_index現有天數：', repr(error))
+        if result.get('otc_price') is not None:
+            seed_index_history(history, '櫃買指數歷史')
+            otc_index_df = pd.DataFrame({
+                'Date': [pd.Timestamp.now(tz=TZ).tz_localize(None).normalize()],
+                'Value': [result['otc_price']]
+            })
+            otc_high_1y = update_history_and_get_high(history, '櫃買指數歷史', otc_index_df)
 
-        if otc_high_1y is None and otc_index_rows:
-            # 備援：tpex_index目前只回傳約一個月資料，並非真正的近一年高點，先用現有範圍內的最高值頂著
-            fallback_closes = []
-            for row in otc_index_rows:
-                try:
-                    fallback_closes.append(float(str(row.get('Close', '')).replace(',', '')))
-                except (ValueError, TypeError):
-                    continue
-            if fallback_closes:
-                otc_high_1y = max(fallback_closes)
-                print('[櫃買回撤] 備援資料僅涵蓋', len(fallback_closes), '筆，非真正近一年高點，僅供暫時參考')
-
-        if otc_high_1y and result.get('otc_price'):
-            result['otc_drawdown'] = result['otc_price'] / otc_high_1y - 1
-            print(f'[櫃買回撤] 高點={otc_high_1y}，回撤={result["otc_drawdown"]}')
+            if otc_high_1y:
+                result['otc_drawdown'] = result['otc_price'] / otc_high_1y - 1
+                print(f'[櫃買回撤] 累積歷史一年高點={otc_high_1y}，回撤={result["otc_drawdown"]}')
     except Exception as error:
         print('櫃買回撤計算失敗：', repr(error))
 
