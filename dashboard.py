@@ -567,7 +567,7 @@ def fetch_twse_realtime(ticker):
 
 
 def fetch_taiex_realtime():
-    """加權指數即時點位+昨收，跟個股同一組TWSE API，代碼固定用 t00。"""
+    """加權指數即時點位+昨收+交易日期，跟個股同一組TWSE API，代碼固定用 t00。"""
     url = (
         'https://mis.twse.com.tw/stock/api/getStockInfo.jsp'
         '?ex_ch=tse_t00.tw&json=1&delay=0'
@@ -589,22 +589,27 @@ def fetch_taiex_realtime():
         payload = response.json()
         rows = payload.get('msgArray') or []
         if not rows:
-            return None, None
+            return None, None, None
 
         row = rows[0]
         raw_price = row.get('z') or row.get('ip')
         raw_prev_close = row.get('y')
+        raw_date = row.get('d')  # 交易日期，格式yyyymmdd
 
         if not raw_price or raw_price == '-':
-            return None, None
+            return None, None, None
         if not raw_prev_close or raw_prev_close == '-':
-            return None, None
+            return None, None, None
 
-        return float(raw_price), float(raw_prev_close)
+        trade_date = None
+        if raw_date and re.fullmatch(r'\d{8}', str(raw_date)):
+            trade_date = str(raw_date)
+
+        return float(raw_price), float(raw_prev_close), trade_date
 
     except Exception as error:
         print('加權指數即時報價抓取失敗：', repr(error))
-        return None, None
+        return None, None, None
 
 
 def fetch_foreign_net_sell():
@@ -1450,19 +1455,24 @@ def fetch_market_overview(history):
         'otc_market_vol': None,
         'otc_market_vol_date': None,
         'taiex_drawdown': None,
-        'otc_drawdown': None
+        'otc_drawdown': None,
+        'order_yoy': None,
+        'order_yoy_period': None,
+        'business_cycle_signal': None,
+        'business_cycle_period': None
     }
 
     # ---- 加權指數 ----
     try:
-        live_price, live_prev_close = fetch_taiex_realtime()
+        live_price, live_prev_close, trade_date = fetch_taiex_realtime()
         if live_price is None:
             info = yf.Ticker('^TWII').fast_info
             live_price = float(info['last_price'])
             live_prev_close = float(info['previous_close'])
+            trade_date = None
 
         result['taiex_price'] = live_price
-        result['taiex_date'] = datetime.now(TZ).strftime('%Y%m%d')
+        result['taiex_date'] = trade_date or datetime.now(TZ).strftime('%Y%m%d')
         if live_prev_close:
             result['taiex_change_pct'] = live_price / live_prev_close - 1
     except Exception as error:
@@ -1497,7 +1507,7 @@ def fetch_market_overview(history):
         if isinstance(twii_1y.columns, pd.MultiIndex):
             twii_1y.columns = twii_1y.columns.get_level_values(0)
 
-        taiex_high_1y = float(twii_1y['Close'].tail(252).max())
+        taiex_high_1y = float(twii_1y['High'].tail(252).max())
         if result.get('taiex_price') and taiex_high_1y:
             result['taiex_drawdown'] = result['taiex_price'] / taiex_high_1y - 1
             print(f'[加權回撤] 近一年高點={taiex_high_1y}，回撤={result["taiex_drawdown"]}')
@@ -1528,7 +1538,11 @@ def fetch_market_overview(history):
         if otc_index_rows:
             latest_row = otc_index_rows[-1]
             result['otc_price'] = float(str(latest_row.get('Close', '')).replace(',', ''))
-            result['otc_date'] = datetime.now(TZ).strftime('%Y%m%d')
+            raw_otc_date = str(
+                latest_row.get('Date') or latest_row.get('TradingDate') or ''
+            ).strip()
+            otc_digits = re.sub(r'\D', '', raw_otc_date)
+            result['otc_date'] = otc_digits if otc_digits else datetime.now(TZ).strftime('%Y%m%d')
 
             try:
                 change_value = float(str(latest_row.get('Change', '')).replace(',', ''))
@@ -1609,7 +1623,7 @@ def fetch_market_overview(history):
             if isinstance(twoii_1y.columns, pd.MultiIndex):
                 twoii_1y.columns = twoii_1y.columns.get_level_values(0)
             if len(twoii_1y) > 0:
-                otc_high_1y = float(twoii_1y['Close'].tail(252).max())
+                otc_high_1y = float(twoii_1y['High'].tail(252).max())
         except Exception as error:
             print('[櫃買回撤] yfinance抓一年資料失敗，改用tpex_index現有天數：', repr(error))
 
@@ -1925,21 +1939,15 @@ def fetch_market_overview(history):
     except Exception as error:
         print('上市公司YoY整體流程失敗：', repr(error))
 
-    # ---- 外資賣超 ----
+    # ---- 外銷訂單年增率 / 景氣燈號（國發會景氣指標，同一份資料一次抓） ----
     try:
-        net_value, net_date = fetch_foreign_net_sell()
-        result['foreign_net_sell'] = net_value
-        result['foreign_net_sell_date'] = net_date
+        ndc_data = fetch_ndc_business_indicators()
+        result['order_yoy'] = ndc_data.get('order_yoy')
+        result['order_yoy_period'] = ndc_data.get('business_cycle_period')
+        result['business_cycle_signal'] = ndc_data.get('business_cycle_signal')
+        result['business_cycle_period'] = ndc_data.get('business_cycle_period')
     except Exception as error:
-        print('外資賣超整體流程失敗：', repr(error))
-
-    # ---- 外資期貨未平倉空單 ----
-    try:
-        net_oi, oi_date = fetch_foreign_futures_net_oi()
-        result['foreign_futures_net_oi'] = net_oi
-        result['foreign_futures_net_oi_date'] = oi_date
-    except Exception as error:
-        print('外資期貨空單整體流程失敗：', repr(error))
+        print('國發會景氣指標整體流程失敗：', repr(error))
 
     return result
 
@@ -3015,19 +3023,30 @@ def main():
             alpha=0.95
         )
 
-    # ---- 外資賣超 ----
-    net_sell_value = market.get('foreign_net_sell')
-    net_sell_date = market.get('foreign_net_sell_date')
-    if net_sell_value is not None:
-        net_sell_text = f"{net_sell_value / 1e8:+.1f}億"
-    else:
-        net_sell_text = 'N/A'
-    net_sell_note = format_date_suffix(net_sell_date)
+    # ---- 外銷訂單YoY ----
+    order_yoy_value = market.get('order_yoy')
+    order_note = ''
+    raw_order_period = market.get('order_yoy_period')
+    if raw_order_period:
+        try:
+            digits = re.sub(r'\D', '', str(raw_order_period))
+            year_4digit = int(digits[:4])
+            month = int(digits[4:6])
+            order_note = f"（{year_4digit % 100:02d}／{month:02d}）"
+        except (ValueError, IndexError):
+            order_note = f"（{raw_order_period}）"
+
+    if order_yoy_value is not None:
+        draw_signal_light(
+            fig, title_ax,
+            metric_state('revenue_yoy', order_yoy_value),
+            x=right_x, y=0.18, r_px=12
+        )
 
     title_ax.text(
-        right_x,
+        right_x + 0.03,
         0.18,
-        f"外資買賣超 {net_sell_text}{net_sell_note}",
+        f"外銷訂單YoY {fmt(order_yoy_value, suffix='%')}{order_note}",
         fontsize=20,
         ha='left',
         va='center',
@@ -3035,19 +3054,25 @@ def main():
         alpha=0.95
     )
 
-    # ---- 外資未平倉 ----
-    net_oi_value = market.get('foreign_futures_net_oi')
-    net_oi_date = market.get('foreign_futures_net_oi_date')
-    if net_oi_value is not None:
-        net_oi_text = f"{net_oi_value:+,.0f}口"
-    else:
-        net_oi_text = 'N/A'
-    net_oi_note = format_date_suffix(net_oi_date)
+    # ---- 景氣燈號 ----
+    signal_text = market.get('business_cycle_signal')
+    signal_color_map = {
+        '藍燈': 'red', '黃藍燈': 'yellow', '綠燈': 'green',
+        '黃紅燈': 'yellow', '紅燈': 'red'
+    }
+    signal_state = signal_color_map.get(signal_text, 'yellow') if signal_text else None
+
+    if signal_state:
+        draw_signal_light(
+            fig, title_ax,
+            signal_state,
+            x=right_x, y=0.06, r_px=12
+        )
 
     title_ax.text(
-        right_x,
+        right_x + 0.03,
         0.06,
-        f"外資未平倉 {net_oi_text}{net_oi_note}",
+        f"景氣燈號 {signal_text or 'N/A'}{order_note}",
         fontsize=20,
         ha='left',
         va='center',
