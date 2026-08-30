@@ -2931,7 +2931,7 @@ def main():
         )
 
     # ---- 右欄：日期 / 櫃買 / 漲跌幅 / 上櫃本益比 / 上櫃波動率 / 外資賣超 / 外資未平倉 ----
-    right_x = 0.66
+    right_x = 0.60
 
     title_ax.text(
         right_x,
@@ -3036,24 +3036,6 @@ def main():
         except (ValueError, IndexError):
             order_note = f"（{raw_order_period}）"
 
-    if order_yoy_value is not None:
-        draw_signal_light(
-            fig, title_ax,
-            metric_state('revenue_yoy', order_yoy_value),
-            x=right_x, y=0.18, r_px=12
-        )
-
-    title_ax.text(
-        right_x + 0.03,
-        0.18,
-        f"外銷訂單YoY {fmt(order_yoy_value, suffix='%')}{order_note}",
-        fontsize=20,
-        ha='left',
-        va='center',
-        color=TEXT_DIM,
-        alpha=0.95
-    )
-
     # ---- 景氣燈號 ----
     signal_text = market.get('business_cycle_signal')
     signal_color_map = {
@@ -3066,13 +3048,31 @@ def main():
         draw_signal_light(
             fig, title_ax,
             signal_state,
+            x=right_x, y=0.18, r_px=12
+        )
+
+    title_ax.text(
+        right_x + 0.03,
+        0.18,
+        f"景氣燈號 {signal_text or 'N/A'}{order_note}",
+        fontsize=20,
+        ha='left',
+        va='center',
+        color=TEXT_DIM,
+        alpha=0.95
+    )
+
+    if order_yoy_value is not None:
+        draw_signal_light(
+            fig, title_ax,
+            metric_state('revenue_yoy', order_yoy_value),
             x=right_x, y=0.06, r_px=12
         )
 
     title_ax.text(
         right_x + 0.03,
         0.06,
-        f"景氣燈號 {signal_text or 'N/A'}{order_note}",
+        f"外銷訂單YoY {fmt(order_yoy_value, suffix='%')}{order_note}",
         fontsize=20,
         ha='left',
         va='center',
@@ -3209,6 +3209,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
