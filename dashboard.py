@@ -1259,6 +1259,106 @@ def fetch_market_revenue_yoy():
 
 
 
+def fetch_export_order_yoy():
+    """
+    外銷訂單金額年增率：直接抓經濟部統計處官方CSV(外銷訂單金額統計，美元計價)，
+    自己用「本月 vs 去年同月」算年增率。
+
+    之前用國發會景氣指標裡的「外銷訂單動向指數」算YoY，那是一個擴散指數
+    (用來看訂單增減的氣氛)，不是實際金額，兩者YoY算出來會完全對不上
+    財經新聞報的數字，這裡改抓真正的金額資料源修正。
+
+    來源：https://service.moea.gov.tw/EE520/opendata/b.csv
+    欄位包含：統計項目、資料期(民國年)、統計值(美元)、計量單位(美元)、
+    統計值(新台幣)、計量單位(新台幣)。這支CSV實際內容沒辦法連線驗證，
+    抓不到或欄位對不上會印出實際欄位/內容方便之後校正。
+    """
+    try:
+        resp = requests.get(
+            'https://service.moea.gov.tw/EE520/opendata/b.csv',
+            timeout=30
+        )
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding
+
+        df = pd.read_csv(StringIO(resp.text))
+
+        print('[外銷訂單金額YoY] 欄位：', list(df.columns))
+        print('[外銷訂單金額YoY] 前3筆：', df.head(3).to_dict('records'))
+        print('[外銷訂單金額YoY] 後3筆：', df.tail(3).to_dict('records'))
+
+        cols = list(df.columns)
+
+        period_col = next(
+            (c for c in cols if '資料期' in c or '年月' in c),
+            None
+        )
+        value_col = next(
+            (c for c in cols if '統計值' in c and '美元' in c),
+            None
+        )
+        item_col = next((c for c in cols if '統計項目' in c), None)
+
+        if period_col is None or value_col is None:
+            print('[外銷訂單金額YoY] 找不到需要的欄位，實際欄位如上，放棄')
+            return None, None
+
+        # 如果「統計項目」欄位裡有多種分類(例如按產品別拆分)，只取代表
+        # 總計的那一列；找不到明確總計字樣的話，印出所有分類方便校正，
+        # 並直接退回不篩選(代表這份資料本身可能就是單一總計時間序列)。
+        if item_col is not None and df[item_col].nunique() > 1:
+            total_keywords = ('合計', '總計', '總值', '外銷訂單')
+            mask = df[item_col].astype(str).str.contains('|'.join(total_keywords))
+            if mask.any():
+                df = df[mask]
+            else:
+                print(
+                    '[外銷訂單金額YoY] 統計項目有多種分類但找不到總計列，實際分類：',
+                    df[item_col].unique()
+                )
+
+        df = df[[period_col, value_col]].copy()
+        df.columns = ['period', 'value']
+        df['period'] = df['period'].map(_normalize_period)
+        df['value'] = pd.to_numeric(
+            df['value'].astype(str).str.replace(',', ''), errors='coerce'
+        )
+        df = (
+            df.dropna(subset=['period', 'value'])
+            .drop_duplicates('period')
+            .sort_values('period')
+        )
+
+        if len(df) < 13:
+            print('[外銷訂單金額YoY] 有效資料筆數不足13筆，無法算年增率')
+            return None, None
+
+        latest = df.iloc[-1]
+        year_ago_rows = df[df['period'] == latest['period'] - 100]
+
+        if year_ago_rows.empty:
+            print('[外銷訂單金額YoY] 找不到去年同月資料，改用往前推13筆頂替')
+            year_ago_value = df.iloc[-13]['value']
+        else:
+            year_ago_value = year_ago_rows.iloc[0]['value']
+
+        if not year_ago_value:
+            print('[外銷訂單金額YoY] 去年同期資料為0，放棄')
+            return None, None
+
+        yoy = (latest['value'] / year_ago_value - 1) * 100
+        period = str(int(latest['period']))
+        print(
+            f'[外銷訂單金額YoY] 資料期={period}，本月={latest["value"]}，'
+            f'去年同期={year_ago_value}，YoY={yoy}'
+        )
+        return yoy, period
+
+    except Exception as error:
+        print('[外銷訂單金額YoY] 抓取失敗：', repr(error))
+        return None, None
+
+
 def fetch_ndc_business_indicators():
     """
     國發會《景氣指標及燈號》資料集(data.gov.tw dataset id 6099)是一份逐月時間序列，
@@ -1952,15 +2052,21 @@ def fetch_market_overview(history):
     except Exception as error:
         print('上市公司YoY整體流程失敗：', repr(error))
 
-    # ---- 外銷訂單年增率 / 景氣燈號（國發會景氣指標，同一份資料一次抓） ----
+    # ---- 景氣燈號（國發會景氣指標）----
     try:
         ndc_data = fetch_ndc_business_indicators()
-        result['order_yoy'] = ndc_data.get('order_yoy')
-        result['order_yoy_period'] = ndc_data.get('business_cycle_period')
         result['business_cycle_signal'] = ndc_data.get('business_cycle_signal')
         result['business_cycle_period'] = ndc_data.get('business_cycle_period')
     except Exception as error:
         print('國發會景氣指標整體流程失敗：', repr(error))
+
+    # ---- 外銷訂單金額年增率（改用經濟部統計處官方CSV，不再用動向指數）----
+    try:
+        order_yoy, order_period = fetch_export_order_yoy()
+        result['order_yoy'] = order_yoy
+        result['order_yoy_period'] = order_period
+    except Exception as error:
+        print('外銷訂單金額YoY整體流程失敗：', repr(error))
 
     return result
 
