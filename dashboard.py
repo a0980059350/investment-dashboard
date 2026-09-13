@@ -54,7 +54,7 @@ ETFS = [
         'name': '00830',
         'display': '費半',
         'ticker': '00830.TW',
-        'ema': 26,
+        'ema': 20,
         'stop_days': 60,
         'stop_discount': 0.6,
         'long_ma_years': 4
@@ -2808,7 +2808,7 @@ def plot_etf(ax, name, etf_bundle, ema_period, stop_days, stop_discount, fig, lo
     else:
         weekly_state = 'yellow'
 
-    weekly_label = f"站上週線{week_ratio*100:+.1f}%" if week_close > week_ema else f"跌破週線{week_ratio*100:+.1f}%"
+    weekly_label = f"站上{ema_period}週{week_ratio*100:+.1f}%" if week_close > week_ema else f"跌破{ema_period}週{week_ratio*100:+.1f}%"
 
     draw_signal_light(
         fig, ax, weekly_state,
@@ -3328,6 +3328,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
